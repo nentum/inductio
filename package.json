@@ -1,0 +1,21 @@
+{
+  "name": "inductio",
+  "version": "0.1.0",
+  "description": "Axiomatic agent semantics: agent as root + evaluation history tree, governed by projection and adoption policies.",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.23.0"
+  },
+  "exports": {
+    ".": "./src/axiomatic-v2.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --test-reporter=spec test/unit/axiomatic-v2.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "25.0.10",
+    "typescript": "5.9.3"
+  }
+}
