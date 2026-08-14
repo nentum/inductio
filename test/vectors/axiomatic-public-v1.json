@@ -1,0 +1,72 @@
+{
+  "version": "axiomatic-public-vector/v1",
+  "root": {
+    "rootPrompt": "Public vector v1\r\nstable",
+    "toolDefinitions": [
+      {
+        "name": "lookup",
+        "description": "Read a fixture.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "key": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "key"
+          ]
+        }
+      }
+    ]
+  },
+  "command": {
+    "parent": "$ROOT",
+    "source": "public-vector/v1",
+    "position": {
+      "sequence": 1
+    },
+    "input": [
+      {
+        "kind": "message",
+        "role": "user",
+        "content": {
+          "text": "hello"
+        }
+      }
+    ],
+    "environment": {
+      "version": "environment-snapshot/v1",
+      "values": {
+        "fixtureRevision": 7
+      }
+    },
+    "evaluator": {
+      "version": "offline-evaluator/v1",
+      "kind": "constant",
+      "output": [
+        {
+          "kind": "message",
+          "role": "assistant",
+          "content": {
+            "text": "world"
+          }
+        }
+      ]
+    }
+  },
+  "expected": {
+    "agent": "sha256:33525c29587d5c3caf958b2a0d39d5cdbda616a9c32c014289db6d1d682f8d4f",
+    "root": "sha256:cb12832f96256f24c66d66cb1e472614a2a7b3bde347480ac24b62b5793dda54",
+    "projection": "sha256:efd6a4f1cc137abd21e592e41d73fc1f47f46e1db168b8c1a945e77121bb4842",
+    "request": "sha256:4f71efc525043122ec321706a2902b2b1098197a8e66da668c5468cd25c7e9cb",
+    "evaluationOccurrence": "sha256:6d6651cd3e6611f98c2abf6e51dc8e47f4be5de586da8118b23d6354cc2a9a14",
+    "evaluation": "sha256:e75176dcba6c60cc4cc12e77c1a64eff2fb8a0e813b292fc580eee6cdd5be0f9",
+    "attempt": "sha256:0542e79f23d47f86aa65630a1fc3585beaabc776a7ff004364e3d914def8276e",
+    "emission": "sha256:cc30faf6b5ebc32b34edc2ee1500db35745f7fdf292b70aa2127b46c2fd63626",
+    "outcome": "sha256:5a338933250b5e43a1bf5a579808b8dbf5812bae4d3014a8b16000cd29a9132b",
+    "decision": "sha256:86040c04bbe4f5e70e463422c023c8b1b9166e2691d0fa92ce45d8aa48de67b4",
+    "node": "sha256:8d10b3a09e856c4abe8fa3e28a86d74675da65cb983b0048ec56755eca9c801d",
+    "stateRef": "sha256:a778c7146d84c0591d1cd73ff8fe84e6161d57d8df5c4f3d1d52d94e298c6394"
+  }
+}

@@ -1,3 +1,45 @@
+# Dependencies
 node_modules/
+
+# TypeScript incremental / emit
 *.tsbuildinfo
+dist/
+build/
+coverage/
+release/
+
+# TLC model checker scratch
+**/states/
+**/*.toolbox/
+
+# OS / editor
 .DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Local env / secrets — private GitHub is not a reason to commit these
+.env
+.env.*
+.envrc
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_rsa.pub
+.npmrc
+**/*apikey*
+**/*credentials*
+*.secret
+**/secrets/
+
+# Local SQLite files created outside tests
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.db-wal
+*.db-shm

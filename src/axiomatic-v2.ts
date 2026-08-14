@@ -1,10 +1,16 @@
 /**
- * D1/D2 公理化语义的纯内存可执行见证。
+ * 公理化语义的纯内存可执行核心。
  *
- * 它复用已经验证的 canonical/hash 机械实现，但不从生产入口导出，
- * 不替代冻结 v1 参考机，也不声明 SQLite 精化已经完成。
+ * 它复用已经验证的 canonical/hash 机械实现，但不会从 package 入口直接
+ * 导出。公开入口只暴露不接受任意政策 callback 的受限 facade。
+ * 本模块不替代冻结 v1 参考机，也不声明 SQLite 精化已经完成。
  */
-import { canonicalize, contentRef, immutableCanonicalCopy } from "./canonical-v1.ts";
+import {
+  canonicalize,
+  contentRef,
+  immutableCanonicalCopy,
+  normalizeBuild,
+} from "./canonical-v1.ts";
 import { SemanticError } from "./errors.ts";
 import type { CanonicalObject, CanonicalValue } from "./types.ts";
 
@@ -46,11 +52,18 @@ const DOMAINS = {
 } as const;
 
 const ROOT_FIELDS = ["rootPrompt", "toolDefinitions"] as const;
+const TOOL_FIELDS = ["name", "description", "inputSchema"] as const;
 const FRAME_FIELDS = ["version", "input", "output", "environment", "metadata"] as const;
+
+export interface AxiomaticToolDefinition {
+  readonly name: string;
+  readonly description: string;
+  readonly inputSchema: CanonicalObject;
+}
 
 export interface AxiomaticRootBody {
   readonly rootPrompt: string;
-  readonly toolDefinitions: CanonicalValue;
+  readonly toolDefinitions: readonly AxiomaticToolDefinition[];
 }
 
 export interface RootView {
@@ -59,10 +72,34 @@ export interface RootView {
   readonly body: AxiomaticRootBody;
 }
 
+export type SemanticItem =
+  | {
+      readonly kind: "message";
+      readonly role: "user" | "assistant";
+      readonly content: CanonicalValue;
+    }
+  | {
+      readonly kind: "thinking";
+      readonly content: CanonicalValue;
+    }
+  | {
+      readonly kind: "tool-call";
+      readonly callId: string;
+      readonly name: string;
+      readonly arguments: CanonicalValue;
+    }
+  | {
+      readonly kind: "tool-result";
+      readonly callId: string;
+      readonly name: string;
+      readonly result: CanonicalValue;
+      readonly isError: boolean;
+    };
+
 export interface SemanticBlock {
   readonly version: "evaluation-frame/v2";
-  readonly input: CanonicalValue;
-  readonly output: CanonicalValue;
+  readonly input: readonly SemanticItem[];
+  readonly output: readonly SemanticItem[];
   readonly environment?: CanonicalValue;
   readonly metadata?: CanonicalValue;
 }
@@ -236,7 +273,6 @@ export type AdoptionDecision =
   | {
       readonly kind: "adopt";
       readonly block: SemanticBlock;
-      readonly intentProposals?: readonly CanonicalValue[];
     }
   | {
       readonly kind: "defer" | "reject";
@@ -257,6 +293,21 @@ export interface AdoptionResult {
   readonly decisionRef: AdoptionDecisionRef;
   readonly decision: AdoptionDecision;
   readonly node?: NodeView;
+}
+
+export interface AxiomaticStateView {
+  readonly version: "axiomatic-state/v2";
+  readonly roots: readonly RootView[];
+  readonly nodes: readonly NodeView[];
+  readonly invocationOccurrences: readonly InvocationOccurrenceView[];
+  readonly evaluationOccurrences: readonly EvaluationOccurrenceView[];
+  readonly projections: readonly ProjectionPlanView[];
+  readonly evaluations: readonly EvaluationView[];
+  readonly emissions: readonly EmissionView[];
+  readonly outcomes: readonly OutcomeView[];
+  readonly unknowns: readonly EvaluationUnknownView[];
+  readonly localFailures: readonly EvaluationLocalFailureView[];
+  readonly adoptions: readonly AdoptionResult[];
 }
 
 interface StoredArtifact {
@@ -324,17 +375,52 @@ function isThenable(value: unknown): boolean {
   );
 }
 
-function normalizeRootBody(body: AxiomaticRootBody): AxiomaticRootBody {
+export function normalizeAxiomaticRootBody(body: AxiomaticRootBody): AxiomaticRootBody {
   canonicalize(body as unknown as CanonicalValue);
   assertObject(body, "RootBody");
   assertExactKeys(body, ROOT_FIELDS, "RootBody");
-  if (typeof body.rootPrompt !== "string") {
-    fail("AXIOMATIC_INVALID_INPUT", "Root.rootPrompt 必须是字符串");
+  if (typeof body.rootPrompt !== "string" || !Array.isArray(body.toolDefinitions)) {
+    fail(
+      "AXIOMATIC_INVALID_INPUT",
+      "Root 必须包含字符串 rootPrompt 和 toolDefinitions 数组",
+    );
   }
-  return Object.freeze({
-    rootPrompt: body.rootPrompt,
-    toolDefinitions: copy(body.toolDefinitions),
-  });
+  for (const tool of body.toolDefinitions) {
+    assertObject(tool, "ToolDefinition");
+    assertExactKeys(tool, TOOL_FIELDS, "ToolDefinition");
+    if (
+      typeof tool.name !== "string" ||
+      typeof tool.description !== "string" ||
+      !tool.inputSchema ||
+      typeof tool.inputSchema !== "object" ||
+      Array.isArray(tool.inputSchema)
+    ) {
+      fail("AXIOMATIC_INVALID_INPUT", "ToolDefinition 字段类型不合法");
+    }
+  }
+  const normalized = normalizeBuild({
+    fixedSystemPrompt: body.rootPrompt,
+    capabilities: body.toolDefinitions.map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.inputSchema,
+    })),
+  }) as {
+    readonly fixedSystemPrompt: string;
+    readonly capabilities: readonly {
+      readonly name: string;
+      readonly description: string;
+      readonly parameters: CanonicalObject;
+    }[];
+  };
+  return copy({
+    rootPrompt: normalized.fixedSystemPrompt,
+    toolDefinitions: normalized.capabilities.map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      inputSchema: tool.parameters,
+    })),
+  }) as unknown as AxiomaticRootBody;
 }
 
 function normalizePolicyIdentity(identity: PolicyIdentity): PolicyIdentity {
@@ -353,7 +439,48 @@ function policyRef(identity: PolicyIdentity): PolicyRef {
   return contentRef(DOMAINS.policy, normalizePolicyIdentity(identity));
 }
 
-function normalizeFrame(block: SemanticBlock): SemanticBlock {
+function normalizeSemanticItem(item: SemanticItem, label: string): SemanticItem {
+  assertObject(item, label);
+  switch (item.kind) {
+    case "message":
+      assertExactKeys(item, ["kind", "role", "content"], label);
+      if (item.role !== "user" && item.role !== "assistant") {
+        fail("AXIOMATIC_INVALID_SHAPE", `${label}.role 不受支持`);
+      }
+      return copy(item as unknown as CanonicalValue) as unknown as SemanticItem;
+    case "thinking":
+      assertExactKeys(item, ["kind", "content"], label);
+      return copy(item as unknown as CanonicalValue) as unknown as SemanticItem;
+    case "tool-call":
+      assertExactKeys(item, ["kind", "callId", "name", "arguments"], label);
+      nonEmpty(item.callId, `${label}.callId`);
+      nonEmpty(item.name, `${label}.name`);
+      return copy(item as unknown as CanonicalValue) as unknown as SemanticItem;
+    case "tool-result":
+      assertExactKeys(item, ["kind", "callId", "name", "result", "isError"], label);
+      nonEmpty(item.callId, `${label}.callId`);
+      nonEmpty(item.name, `${label}.name`);
+      if (typeof item.isError !== "boolean") {
+        fail("AXIOMATIC_INVALID_SHAPE", `${label}.isError 必须是 boolean`);
+      }
+      return copy(item as unknown as CanonicalValue) as unknown as SemanticItem;
+    default:
+      fail("AXIOMATIC_INVALID_SHAPE", `${label}.kind 不受支持`);
+  }
+}
+
+export function normalizeAxiomaticSemanticItems(
+  items: readonly SemanticItem[],
+  label = "SemanticItems",
+): readonly SemanticItem[] {
+  canonicalize(items as unknown as CanonicalValue);
+  if (!Array.isArray(items)) {
+    fail("AXIOMATIC_INVALID_SHAPE", `${label} 必须是数组`);
+  }
+  return Object.freeze(items.map((item, index) => normalizeSemanticItem(item, `${label}[${index}]`)));
+}
+
+export function normalizeAxiomaticSemanticBlock(block: SemanticBlock): SemanticBlock {
   canonicalize(block as unknown as CanonicalValue);
   assertObject(block, "SemanticBlock");
   const actual = Object.keys(block);
@@ -368,7 +495,45 @@ function normalizeFrame(block: SemanticBlock): SemanticBlock {
   if (block.version !== "evaluation-frame/v2") {
     fail("AXIOMATIC_INVALID_SHAPE", "SemanticBlock.version 必须为 evaluation-frame/v2");
   }
-  return copy(block as unknown as CanonicalValue) as unknown as SemanticBlock;
+  const input = normalizeAxiomaticSemanticItems(block.input, "SemanticBlock.input");
+  const output = normalizeAxiomaticSemanticItems(block.output, "SemanticBlock.output");
+  if (
+    input.some(
+      (item) =>
+        !(
+          (item.kind === "message" && item.role === "user") ||
+          item.kind === "tool-result"
+        ),
+    )
+  ) {
+    fail(
+      "AXIOMATIC_INVALID_SHAPE",
+      "SemanticBlock.input 只接受 user message 与 tool-result",
+    );
+  }
+  if (
+    output.some(
+      (item) =>
+        !(
+          (item.kind === "message" && item.role === "assistant") ||
+          item.kind === "thinking" ||
+          item.kind === "tool-call"
+        ),
+    )
+  ) {
+    fail(
+      "AXIOMATIC_INVALID_SHAPE",
+      "SemanticBlock.output 只接受 assistant message、thinking 与 tool-call",
+    );
+  }
+  const normalized = {
+    version: block.version,
+    input,
+    output,
+    ...(block.environment === undefined ? {} : { environment: copy(block.environment) }),
+    ...(block.metadata === undefined ? {} : { metadata: copy(block.metadata) }),
+  } satisfies SemanticBlock;
+  return copy(normalized as unknown as CanonicalValue) as unknown as SemanticBlock;
 }
 
 function normalizeOutcomeKind(kind: unknown): EvaluationOutcomeKind {
@@ -382,27 +547,11 @@ function normalizeDecision(decision: AdoptionDecision): AdoptionDecision {
   canonicalize(decision as unknown as CanonicalValue);
   assertObject(decision, "AdoptionDecision");
   if (decision.kind === "adopt") {
-    assertExactKeys(
-      decision,
-      decision.intentProposals === undefined
-        ? ["kind", "block"]
-        : ["kind", "block", "intentProposals"],
-      "Adopt decision",
-    );
-    const block = normalizeFrame(decision.block);
-    const intentProposals = decision.intentProposals;
-    if (intentProposals !== undefined && !Array.isArray(intentProposals)) {
-      fail("AXIOMATIC_INVALID_SHAPE", "intentProposals 必须是数组");
-    }
-    return Object.freeze(
-      intentProposals === undefined
-        ? { kind: "adopt" as const, block }
-        : {
-            kind: "adopt" as const,
-            block,
-            intentProposals: Object.freeze(intentProposals.map((value) => copy(value))),
-          },
-    );
+    assertExactKeys(decision, ["kind", "block"], "Adopt decision");
+    return Object.freeze({
+      kind: "adopt" as const,
+      block: normalizeAxiomaticSemanticBlock(decision.block),
+    });
   }
   if (decision.kind === "defer" || decision.kind === "reject") {
     assertExactKeys(decision, ["kind", "reason"], `${decision.kind} decision`);
@@ -411,8 +560,8 @@ function normalizeDecision(decision: AdoptionDecision): AdoptionDecision {
   fail("AXIOMATIC_INVALID_SHAPE", "AdoptionDecision.kind 不受支持");
 }
 
-function sortRefs(refs: readonly string[]): readonly string[] {
-  return Object.freeze([...refs]);
+function byRef<T extends { readonly ref: string }>(left: T, right: T): number {
+  return Buffer.from(left.ref, "utf8").compare(Buffer.from(right.ref, "utf8"));
 }
 
 export class AxiomaticRuntimeV2 {
@@ -452,7 +601,7 @@ export class AxiomaticRuntimeV2 {
 
   createRoot(body: AxiomaticRootBody): RootView {
     this.#assertPolicyHasNoPower();
-    const normalized = normalizeRootBody(body);
+    const normalized = normalizeAxiomaticRootBody(body);
     const agent = contentRef(DOMAINS.agent, normalized as unknown as CanonicalValue);
     const root = contentRef(DOMAINS.root, agent);
     const existing = this.#roots.get(root);
@@ -474,7 +623,7 @@ export class AxiomaticRuntimeV2 {
 
   #appendNode(parent: AxiomaticRevisionRef, block: SemanticBlock): NodeView {
     const root = this.#rootForRevision(parent);
-    const normalized = normalizeFrame(block);
+    const normalized = normalizeAxiomaticSemanticBlock(block);
     const value = objectValue({
       version: "axiomatic-node/v2",
       parent,
@@ -978,6 +1127,70 @@ export class AxiomaticRuntimeV2 {
     return this.#adoptionView(result);
   }
 
+  state(): AxiomaticStateView {
+    this.#assertPolicyHasNoPower();
+    return Object.freeze({
+      version: "axiomatic-state/v2",
+      roots: Object.freeze(
+        [...this.#roots.values()]
+          .toSorted((left, right) =>
+            Buffer.from(left.root, "utf8").compare(Buffer.from(right.root, "utf8")),
+          )
+          .map((root) => this.#rootView(root)),
+      ),
+      nodes: Object.freeze(
+        [...this.#nodes.values()].toSorted(byRef).map((node) => this.#nodeView(node)),
+      ),
+      invocationOccurrences: Object.freeze(
+        [...this.#occurrences.values()]
+          .toSorted(byRef)
+          .map((occurrence) => this.#occurrenceView(occurrence)),
+      ),
+      evaluationOccurrences: Object.freeze(
+        [...this.#evaluationOccurrences.values()]
+          .toSorted(byRef)
+          .map((occurrence) => this.#evaluationOccurrenceView(occurrence)),
+      ),
+      projections: Object.freeze(
+        [...this.#plans.values()].toSorted(byRef).map((plan) => this.#projectionView(plan)),
+      ),
+      evaluations: Object.freeze(
+        [...this.#evaluations.values()]
+          .toSorted(byRef)
+          .map((evaluation) => this.#evaluationView(evaluation)),
+      ),
+      emissions: Object.freeze(
+        [...this.#emissions.values()]
+          .toSorted(byRef)
+          .map((emission) => this.#emissionView(emission)),
+      ),
+      outcomes: Object.freeze(
+        [...this.#outcomes.values()]
+          .toSorted(byRef)
+          .map((outcome) => this.#outcomeView(outcome)),
+      ),
+      unknowns: Object.freeze(
+        [...this.#unknowns.values()]
+          .toSorted(byRef)
+          .map((unknown) => this.#unknownView(unknown)),
+      ),
+      localFailures: Object.freeze(
+        [...this.#localFailures.values()]
+          .toSorted(byRef)
+          .map((failure) => this.#localFailureView(failure)),
+      ),
+      adoptions: Object.freeze(
+        [...this.#adoptions.values()]
+          .toSorted((left, right) =>
+            Buffer.from(left.decisionRef, "utf8").compare(
+              Buffer.from(right.decisionRef, "utf8"),
+            ),
+          )
+          .map((adoption) => this.#adoptionView(adoption)),
+      ),
+    });
+  }
+
   getEvaluation(ref: EvaluationRunRef): EvaluationView {
     this.#assertPolicyHasNoPower();
     return this.#evaluationView(this.#evaluation(ref));
@@ -1191,7 +1404,7 @@ export class AxiomaticRuntimeV2 {
           kind: "node" as const,
           ref: node.ref,
           parent: node.parent,
-          block: normalizeFrame(node.block),
+          block: normalizeAxiomaticSemanticBlock(node.block),
         });
       }),
     );
@@ -1201,10 +1414,7 @@ export class AxiomaticRuntimeV2 {
     return Object.freeze({
       agent: root.agent,
       root: root.root,
-      body: Object.freeze({
-        rootPrompt: root.body.rootPrompt,
-        toolDefinitions: copy(root.body.toolDefinitions),
-      }),
+      body: normalizeAxiomaticRootBody(root.body),
     });
   }
 
@@ -1214,7 +1424,7 @@ export class AxiomaticRuntimeV2 {
       root: node.root,
       agent: node.agent,
       parent: node.parent,
-      block: normalizeFrame(node.block),
+      block: normalizeAxiomaticSemanticBlock(node.block),
     });
   }
 
@@ -1249,6 +1459,27 @@ export class AxiomaticRuntimeV2 {
       selectedNodes: Object.freeze([...plan.selectedNodes]),
       appendContent: copy(plan.appendContent),
       transformations: Object.freeze(plan.transformations.map((item) => copy(item))),
+    });
+  }
+
+  #outcomeView(outcome: OutcomeView): OutcomeView {
+    return Object.freeze({
+      ref: outcome.ref,
+      evaluation: outcome.evaluation,
+      attempt: outcome.attempt,
+      kind: outcome.kind,
+      detailsRef: outcome.detailsRef,
+      details: copy(outcome.details),
+    });
+  }
+
+  #unknownView(unknown: EvaluationUnknownView): EvaluationUnknownView {
+    return Object.freeze({
+      ref: unknown.ref,
+      evaluation: unknown.evaluation,
+      attempt: unknown.attempt,
+      reasonRef: unknown.reasonRef,
+      reason: copy(unknown.reason),
     });
   }
 

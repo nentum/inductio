@@ -13,13 +13,22 @@ import { expectCode } from "../helpers/expect-code.ts";
 
 const rootBody = {
   rootPrompt: "root prompt",
-  toolDefinitions: {
-    read_data: {
+  toolDefinitions: [
+    {
+      name: "read_data",
       description: "read deterministic data",
-      parameters: { type: "object" },
+      inputSchema: { type: "object" },
     },
-  },
+  ],
 } as const;
+
+function userMessage(content: unknown) {
+  return [{ kind: "message" as const, role: "user" as const, content: content as never }];
+}
+
+function assistantMessage(content: unknown) {
+  return [{ kind: "message" as const, role: "assistant" as const, content: content as never }];
+}
 
 function projectionPolicy(
   appendContent: (input: {
@@ -53,8 +62,8 @@ const adoptingPolicy: VersionedAdoptionPolicy = {
       kind: "adopt",
       block: {
         version: "evaluation-frame/v2",
-        input: input.candidateInput,
-        output: { answer: "ok" },
+        input: userMessage(input.candidateInput),
+        output: assistantMessage({ answer: "ok" }),
       },
     };
   },
@@ -111,8 +120,8 @@ function adoptFrame(
         kind: "adopt",
         block: {
           version: "evaluation-frame/v2",
-          input: input.candidateInput,
-          output: { text: outputText },
+          input: userMessage(input.candidateInput),
+          output: assistantMessage({ text: outputText }),
         },
       };
     },
@@ -365,8 +374,8 @@ test("固定 AdoptionPolicy 输入异值重放拒绝；attempt 只能认领一�
         kind: "adopt",
         block: {
           version: "evaluation-frame/v2",
-          input: input.candidateInput,
-          output: { generation },
+          input: userMessage(input.candidateInput),
+          output: assistantMessage({ generation }),
         },
       };
     },
@@ -482,15 +491,15 @@ test("哈希形字符串仍是普通语义文本；执行 provenance 只存在�
         kind: "adopt",
         block: {
           version: "evaluation-frame/v2",
-          input: input.candidateInput,
-          output: { quotedText: input.evaluation.ref },
+          input: userMessage(input.candidateInput),
+          output: assistantMessage({ quotedText: input.evaluation.ref }),
         },
       };
     },
   };
   const adopted = runtime.adoptEvaluation(evaluation, policy);
   assert.ok(adopted.node);
-  assert.deepEqual(adopted.node.block.output, { quotedText: evaluation });
+  assert.deepEqual(adopted.node.block.output, assistantMessage({ quotedText: evaluation }));
   assert.equal(adopted.node.parent, root.root);
 });
 
@@ -506,8 +515,8 @@ test("AdoptionPolicy 不能提交 schema 外字段", () => {
         kind: "adopt",
         block: {
           version: "evaluation-frame/v2",
-          input: { text: "input" },
-          output: { output: "output" },
+          input: userMessage({ text: "input" }),
+          output: assistantMessage({ output: "output" }),
           extra: "not allowed",
         } as unknown as SemanticBlock,
       };
