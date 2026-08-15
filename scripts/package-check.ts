@@ -67,9 +67,9 @@ try {
     readonly exports?: unknown;
   };
   assert.equal(manifest.name, "inductio");
-  assert.equal(manifest.version, "0.1.0");
+  assert.equal(manifest.version, "0.3.0");
   assert.equal(manifest.private, false);
-  assert.equal(manifest.license, "UNLICENSED");
+  assert.equal(manifest.license, "MIT");
   assert.equal(manifest.packageManager, "npm@10.9.8");
   assert.deepEqual(manifest.os, ["win32", "linux"]);
   assert.deepEqual(manifest.cpu, ["x64"]);
@@ -93,10 +93,10 @@ try {
     readonly files: readonly { readonly path: string }[];
   }[];
   assert.ok(packed, "npm pack did not report an artifact");
-  assert.equal(packed.filename, "inductio-0.1.0.tgz");
+  assert.equal(packed.filename, "inductio-0.3.0.tgz");
   assert.deepEqual(
     packed.files.map((file) => file.path).toSorted(),
-    ["README.md", "RELEASE-SCOPE.md", "dist/index.d.ts", "dist/index.js", "package.json"],
+    ["LICENSE", "README.md", "RELEASE-SCOPE.md", "dist/index.d.ts", "dist/index.js", "package.json", "schema/003-axiomatic-v2.sql"],
   );
   const tarball = join(temporary, packed.filename);
   const secondPackDirectory = join(temporary, "second-pack");
@@ -117,8 +117,19 @@ try {
 
   const bundle = readFileSync(join(root, "dist/index.js"), "utf8");
   const declarations = readFileSync(join(root, "dist/index.d.ts"), "utf8");
-  for (const forbidden of [
+  const nativeImports = [...new Set(
+    [...bundle.matchAll(/node:[a-z0-9_/-]+/g)].map((match) => match[0]),
+  )].toSorted();
+  assert.deepEqual(nativeImports, [
+    "node:child_process",
+    "node:crypto",
+    "node:fs",
+    "node:path",
     "node:sqlite",
+    "node:url",
+    "node:vm",
+  ]);
+  for (const forbidden of [
     "AGENT_RUNTIME_FAULT_HOOK",
     "InternalHost",
     "OwnerToken",
@@ -135,6 +146,9 @@ try {
   }
   for (const hidden of [
     "AxiomaticRuntimeV2",
+    "AxiomaticDurableEngine",
+    "AxiomaticSqliteConnection",
+    "modelClient",
     "VersionedProjectionPolicy",
     "VersionedAdoptionPolicy",
   ]) {
@@ -144,6 +158,9 @@ try {
       `declarations expose lower-level core: ${hidden}`,
     );
   }
+  assert.match(declarations, /apiKeyEnv: "OPENCODE_GO"/);
+  assert.equal(declarations.includes("apiKeyEnv?:"), false, "declarations expose configurable apiKeyEnv");
+  assert.equal(declarations.includes("fetch?: typeof globalThis.fetch"), false, "declarations expose fetch injection");
 
   mkdirSync(consumer);
   writeFileSync(join(consumer, "package.json"), '{"private":true,"type":"module"}\n', "utf8");
@@ -155,15 +172,66 @@ try {
   writeFileSync(
     join(consumer, "smoke.mjs"),
     `import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import * as runtimePackage from "inductio";
 
 assert.deepEqual(Object.keys(runtimePackage).sort(), [
   "InMemoryAgentRuntime",
+  "OPENCODE_GO_DEFAULTS",
+  "OpenCodeGoClient",
   "SemanticError",
+  "SqliteAgentRuntime",
+  "compileOpenCodeGoChatRequest",
   "createInMemoryAgentRuntime",
+  "effectivePolicyIdentity",
+  "executePolicyPlugin",
   "inMemoryRuntimeStateRef",
+  "normalizePolicyPlugin",
+  "normalizePolicyPluginPair",
   "restoreInMemoryAgentRuntime",
 ]);
+const pluginPath = fileURLToPath(new URL("./package-plugin.mjs", import.meta.url));
+writeFileSync(pluginPath, [
+  "export default function project(input) {",
+  "  return {",
+  "    selectedNodes: [],",
+  "    appendContent: {",
+  "      version: 'offline-model-input/v1',",
+  "      history: [],",
+  "      candidateInput: input.candidateInput,",
+  "      environment: input.environment,",
+  "    },",
+  "  };",
+  "}",
+].join("\\n") + "\\n");
+const plugin = runtimePackage.normalizePolicyPlugin({
+  version: "policy-plugin/v1",
+  identity: { kind: "projection", name: "package-smoke", version: "v1" },
+  module: pluginPath,
+  sourceSha256: createHash("sha256").update(readFileSync(pluginPath)).digest("hex"),
+}, "projection");
+const pluginResult = await runtimePackage.executePolicyPlugin(plugin, {
+  root: {
+    agent: "sha256:" + "1".repeat(64),
+    root: "sha256:" + "2".repeat(64),
+    body: { rootPrompt: "smoke", toolDefinitions: [] },
+  },
+  parent: "sha256:" + "2".repeat(64),
+  path: [{
+    kind: "root",
+    ref: "sha256:" + "2".repeat(64),
+    body: { rootPrompt: "smoke", toolDefinitions: [] },
+  }],
+  candidateInput: [{ kind: "message", role: "user", content: "hello" }],
+  environment: { version: "environment-snapshot/v1", values: null },
+  endpoint: { version: "offline-endpoint/v1" },
+  explicitInputs: null,
+});
+assert.deepEqual(pluginResult.selectedNodes, []);
 const runtime = runtimePackage.createInMemoryAgentRuntime({
   rootPrompt: "offline smoke",
   toolDefinitions: [],
@@ -180,6 +248,30 @@ assert.notEqual(first.head, first.parent);
 const restored = runtimePackage.restoreInMemoryAgentRuntime(runtime.snapshot());
 assert.equal(restored.stateRef(), runtime.stateRef());
 assert.deepEqual(restored.path(first.head), runtime.path(first.head));
+const durableDirectory = mkdtempSync(join(tmpdir(), "axiomatic-package-sqlite-"));
+const previousKey = process.env.OPENCODE_GO;
+const previousFetch = globalThis.fetch;
+process.env.OPENCODE_GO = "package-test-key";
+globalThis.fetch = async () => new Response(JSON.stringify({
+  choices: [{ finish_reason: "stop", message: { content: "ok" } }],
+}), { status: 200, headers: { "content-type": "application/json" } });
+const durable = runtimePackage.SqliteAgentRuntime.open(
+  join(durableDirectory, "runtime.db"),
+  { rootPrompt: "durable smoke", toolDefinitions: [] },
+  {},
+);
+const durableResult = await durable.run({
+  parent: durable.root().root,
+  source: "package-durable-smoke",
+  position: 1,
+  input: [{ kind: "message", role: "user", content: "hello" }],
+});
+assert.equal(durableResult.status, "completed");
+durable.close();
+globalThis.fetch = previousFetch;
+if (previousKey === undefined) delete process.env.OPENCODE_GO;
+else process.env.OPENCODE_GO = previousKey;
+rmSync(durableDirectory, { recursive: true, force: true });
 await assert.rejects(
   import("inductio/dist/index.js"),
   (error) => error?.code === "ERR_PACKAGE_PATH_NOT_EXPORTED",
@@ -194,9 +286,11 @@ console.log("INSTALLED_PACKAGE_SMOKE=PASS");
   writeFileSync(
     join(consumer, "type-smoke.ts"),
     `import {
+  SqliteAgentRuntime,
   createInMemoryAgentRuntime,
   type AxiomaticRootBody,
   type SemanticItem,
+  type SqliteAgentRuntimeOptions,
 } from "inductio";
 
 const root: AxiomaticRootBody = { rootPrompt: "typed", toolDefinitions: [] };
@@ -211,6 +305,15 @@ runtime.run({
   input,
   evaluator: { version: "offline-evaluator/v1", kind: "echo" },
 });
+const sqliteOptions: SqliteAgentRuntimeOptions = { timeoutMs: 30_000 };
+const durable = SqliteAgentRuntime.open("/absolute/type-smoke.db", root, sqliteOptions);
+void durable.run({
+  parent: durable.root().root,
+  source: "durable-type-smoke",
+  position: 1,
+  input,
+});
+durable.close();
 `,
     "utf8",
   );

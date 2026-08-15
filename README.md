@@ -11,58 +11,66 @@ Inductio 是 agent 语义的公理化核心：**agent 不是一个人，没有�
 - **政策决定成长**：`ProjectionPolicy` 决定单次求值把哪些历史引入上下文；`AdoptionPolicy` 决定求值结果是否、如何被采纳为树的节点。不可公理化的东西被政策挡在系统外部。
 - **内容寻址**：节点身份 = 内容哈希。相同内容收敛为相同节点；引用即快照；结构共享。
 - **执行与语义分离**：Emission/Outcome（发生了什么）先落账本，Node（是什么语义）只保存政策认定的语义块——来源与语义不互相污染。
+- **命令账本**：SQLite 只存"发生了什么"（append-only 命令序列）；树的当前状态是账本重放的产物。账本线性、树分叉、CAS 裁判、崩溃后幂等重放。
 
-## 当前状态（0.1.0）
+## 当前状态（0.3.0）
 
 - ✅ 公理语义核心（`src/axiomatic-v2.ts`）：Root / Node / 树 / Projection / Emission / Adoption / Evaluation
-- ✅ **确定性离线内存运行时**（`src/in-memory-agent-runtime.ts`）：`InMemoryAgentRuntime` 生产入口，内置 echo/constant/failure 求值器，可序列化/恢复运行时快照，运行日志可重放验证
-- ✅ 公开 API 面（`src/index.ts`）+ 打包产物（esbuild + dts-bundle）
-- ✅ 14 + 7 个测试（公理语义 + 公开运行时），跨 OS 字节一致 CI
-- ⏳ SQLite 持久化（未开始）
-- ⏳ 真实模型 transport（未开始）
+- ✅ 确定性离线内存运行时（`src/in-memory-agent-runtime.ts`）
+- ✅ **任意政策插件 + 沙箱**（`src/policy-sandbox.ts`）：ESM-only、哈希钉扎、子进程隔离、无网络/无文件、超时可终止
+- ✅ **SQLite 命令账本**（`src/axiomatic-durable-engine.ts` + `schema/003-axiomatic-v2.sql`）：append-only 命令、事务原子性、投影表、重放校验、崩溃恢复
+- ✅ **真实模型 transport**（`src/opencode-go-client.ts`）：OpenAI-compatible、`OPENCODE_GO` 密钥、live E2E 已通过
+- ✅ 生产运行时（`src/sqlite-agent-runtime.ts`）：`SqliteAgentRuntime` 组合根，evaluate/status/close/crashClose
+- ✅ 崩溃恢复证明：attempt / Emission / Outcome 三切点 OS-kill 测试 + 多进程 CAS 竞争测试
+- ✅ 跨 OS 字节一致 CI（Windows x64 + Linux amd64）
 
 ## 使用
 
 ```bash
 npm install
-npm test                # 公理语义 + 公开运行时测试
-npm run release:check   # typecheck + test + build + package check
+npm test                 # unit + multiprocess + crash
+npm run test:live:opencode-go   # 真实模型（需要 OPENCODE_GO 环境变量）
+npm run release:check    # typecheck + test + build + package check
 ```
 
 要求 Node.js >= 22.23.0。运行时零依赖；开发依赖仅 TypeScript / esbuild / dts-bundle-generator。
 
-## 公开 API（0.1.0）
+## 公开 API（0.3.0）
 
 ```ts
-import { InMemoryAgentRuntime, createInMemoryAgentRuntime } from "inductio";
+import { InMemoryAgentRuntime, SqliteAgentRuntime, OpenCodeGoClient } from "inductio";
 
-const runtime = createInMemoryAgentRuntime({
-  rootPrompt: "...",
-  toolDefinitions: [],
-  evaluator: { version: "offline-evaluator/v1", kind: "echo" },
-});
+// 纯内存（离线、确定性）
+const memory = createInMemoryAgentRuntime({ rootPrompt: "...", evaluator: { version: "offline-evaluator/v1", kind: "echo" } });
 
-const result = runtime.runEvaluation({ input: "..." });
-const snapshot = runtime.serializeState();   // 可持久化/恢复
+// 持久化 + 真实模型（命令账本）
+const durable = SqliteAgentRuntime.open({ databasePath: "./agent.db", root: { ... }, model: "deepseek-v4-flash" });
+const result = await durable.run({ input: [...], signal });
+const stateRef = durable.stateRef();   // 状态指纹（内容寻址）
+durable.close();
 ```
 
-发布范围细节见 `RELEASE-SCOPE.md`。0.1.0 刻意只支持：单进程内存运行、确定性离线求值器、完整路径内置投影、完成的输出采纳——不做并发存储、不做真实网络、不做任意策略回调。
+发布范围细节见 `RELEASE-SCOPE.md`。
 
 ## 结构
 
 ```
-src/axiomatic-v2.ts           公理语义核心（Root / Node / Evaluation / Projection / Emission / Adoption）
-src/in-memory-agent-runtime.ts 确定性离线内存运行时（公开 API 实现）
-src/index.ts                  生产入口（仅导出公开面）
-src/canonical-v1.ts           内容寻址 / 规范化 / 哈希（基础）
-src/domains.ts                哈希域常量
-src/errors.ts                 语义错误类型
-src/types.ts                  类型定义
-test/unit/                    公理语义 + 公开运行时测试
-test/vectors/                 公开行为固定向量
-scripts/                      打包与发布校验
+src/axiomatic-v2.ts                   公理语义核心（纯内存，重放执行）
+src/in-memory-agent-runtime.ts        确定性离线运行时
+src/policy-sandbox.ts                 政策插件沙箱（隔离执行）
+src/axiomatic-durable-engine.ts       SQLite 命令账本引擎（append/replay/audit）
+src/axiomatic-sqlite-connection.ts    SQLite 连接与 schema 安装
+src/sqlite-agent-runtime.ts           生产运行时组合根
+src/opencode-go-client.ts             OpenAI-compatible 真实 transport
+src/index.ts                          生产入口（仅导出公开面）
+src/canonical-v1.ts                   内容寻址 / 规范化 / 哈希（基础）
+schema/003-axiomatic-v2.sql           命令账本 schema
+test/unit/                            语义 + 运行时 + 沙箱 + 持久化 + transport 测试
+test/multiprocess/                    多进程 CAS 竞争证据
+test/crash/                           OS-kill 崩溃恢复证据
+test/fixtures/policy-plugins/         沙箱插件样例（ESM）
 ```
 
-## 名字
+## 许可证
 
-Inductio 与 deductio（演绎）同属拉丁语 `ducere`（引导）词族：演绎把结论从公理中**引导出来**，inductio 把历史**引导进入**上下文、把结果**引导进入**树——系统不是被证明出来的，是被长出来的。
+[MIT](LICENSE)

@@ -1,6 +1,13 @@
 import { canonicalize, contentRef, immutableCanonicalCopy } from "./canonical-v1.ts";
 import { SemanticError } from "./errors.ts";
 import {
+  effectivePolicyIdentity,
+  executePolicyPlugin,
+  normalizePolicyPluginPair,
+  type NormalizedPolicyPluginPairV1,
+  type PolicyPluginPairV1,
+} from "./policy-sandbox.ts";
+import {
   AxiomaticRuntimeV2,
   normalizeAxiomaticRootBody,
   normalizeAxiomaticSemanticItems,
@@ -25,21 +32,22 @@ import {
   type SemanticItem,
   type VersionedAdoptionPolicy,
   type VersionedProjectionPolicy,
+  type PolicyIdentity,
+  type ProjectionDraft,
 } from "./axiomatic-v2.ts";
 import type { CanonicalValue } from "./types.ts";
 
 const PUBLIC_STATE_DOMAIN = "axiomatic-public-state/v1";
 const OFFLINE_REQUEST_DOMAIN = "axiomatic-offline-request/v1";
 const SNAPSHOT_FIELDS = ["version", "root", "runs", "stateRef"] as const;
+const RUN_REQUIRED_FIELDS = ["parent", "source", "position", "input", "evaluator"] as const;
 const RUN_FIELDS = [
-  "parent",
-  "source",
-  "position",
-  "input",
+  ...RUN_REQUIRED_FIELDS,
   "environment",
-  "evaluator",
   "evaluationOccurrence",
+  "policyPlugins",
 ] as const;
+const RUN_BASE_FIELDS = [...RUN_REQUIRED_FIELDS, "environment", "evaluationOccurrence"] as const;
 
 export interface EnvironmentSnapshotV1 {
   readonly version: "environment-snapshot/v1";
@@ -77,6 +85,14 @@ export interface RunInMemoryEvaluationInput {
   readonly evaluationOccurrence?: EvaluationOccurrenceInput;
 }
 
+export interface RunWithPolicyPluginsInput extends RunInMemoryEvaluationInput {
+  readonly policyPlugins: PolicyPluginPairV1;
+}
+
+export interface PolicyPluginRunOptions {
+  readonly signal?: AbortSignal;
+}
+
 export interface InMemorySnapshotRunV1 {
   readonly parent: AxiomaticRevisionRef;
   readonly source: string;
@@ -85,6 +101,7 @@ export interface InMemorySnapshotRunV1 {
   readonly environment: EnvironmentSnapshotV1;
   readonly evaluator: OfflineEvaluatorV1;
   readonly evaluationOccurrence: EvaluationOccurrenceInput | null;
+  readonly policyPlugins?: NormalizedPolicyPluginPairV1;
 }
 
 export interface OfflineModelInputV1 {
@@ -296,22 +313,12 @@ function normalizeEvaluationOccurrence(
   return Object.freeze({ source: value.source, position: copy(value.position) });
 }
 
-function normalizeRun(input: RunInMemoryEvaluationInput): InMemorySnapshotRunV1 {
+function normalizeRunFields(
+  input: RunInMemoryEvaluationInput,
+  policyPlugins?: NormalizedPolicyPluginPairV1,
+): InMemorySnapshotRunV1 {
   canonicalize(input);
   assertObject(input, "evaluation input");
-  assertExactKeys(
-    input,
-    [
-      "parent",
-      "source",
-      "position",
-      "input",
-      "evaluator",
-      ...(input.environment === undefined ? [] : ["environment"]),
-      ...(input.evaluationOccurrence === undefined ? [] : ["evaluationOccurrence"]),
-    ],
-    "evaluation input",
-  );
   nonEmpty(input.parent, "parent");
   nonEmpty(input.source, "source");
   return Object.freeze({
@@ -322,14 +329,50 @@ function normalizeRun(input: RunInMemoryEvaluationInput): InMemorySnapshotRunV1 
     environment: normalizeEnvironment(input.environment),
     evaluator: normalizeEvaluator(input.evaluator),
     evaluationOccurrence: normalizeEvaluationOccurrence(input.evaluationOccurrence),
+    ...(policyPlugins === undefined ? {} : { policyPlugins }),
   });
+}
+
+function normalizeRun(input: RunInMemoryEvaluationInput): InMemorySnapshotRunV1 {
+  canonicalize(input);
+  assertObject(input, "evaluation input");
+  assertExactKeys(
+    input,
+    [
+      ...RUN_REQUIRED_FIELDS,
+      ...(input.environment === undefined ? [] : ["environment"]),
+      ...(input.evaluationOccurrence === undefined ? [] : ["evaluationOccurrence"]),
+    ],
+    "evaluation input",
+  );
+  return normalizeRunFields(input);
+}
+
+function normalizePluginRun(input: RunWithPolicyPluginsInput): InMemorySnapshotRunV1 {
+  canonicalize(input);
+  assertObject(input, "policy plugin evaluation input");
+  assertExactKeys(
+    input,
+    [
+      ...RUN_REQUIRED_FIELDS,
+      "policyPlugins",
+      ...(input.environment === undefined ? [] : ["environment"]),
+      ...(input.evaluationOccurrence === undefined ? [] : ["evaluationOccurrence"]),
+    ],
+    "policy plugin evaluation input",
+  );
+  return normalizeRunFields(input, normalizePolicyPluginPair(input.policyPlugins));
 }
 
 function normalizeStoredRun(value: InMemorySnapshotRunV1): InMemorySnapshotRunV1 {
   canonicalize(value);
   assertObject(value, "snapshot run");
-  assertExactKeys(value, RUN_FIELDS, "snapshot run");
-  return normalizeRun({
+  assertExactKeys(
+    value,
+    value.policyPlugins === undefined ? RUN_BASE_FIELDS : RUN_FIELDS,
+    "snapshot run",
+  );
+  const base = {
     parent: value.parent,
     source: value.source,
     position: value.position,
@@ -339,7 +382,10 @@ function normalizeStoredRun(value: InMemorySnapshotRunV1): InMemorySnapshotRunV1
     ...(value.evaluationOccurrence === null
       ? {}
       : { evaluationOccurrence: value.evaluationOccurrence }),
-  });
+  } satisfies RunInMemoryEvaluationInput;
+  return value.policyPlugins === undefined
+    ? normalizeRun(base)
+    : normalizeRunFields(base, value.policyPlugins);
 }
 
 function executeEvaluator(
@@ -410,6 +456,17 @@ function compileOfflineRequest(
   return copy({ ref, ...value } as unknown as CanonicalValue) as unknown as OfflineModelRequestV1;
 }
 
+function policyFailureDecision(error: unknown): AdoptionDecision {
+  return {
+    kind: "reject",
+    reason: {
+      code: error instanceof SemanticError
+        ? error.code
+        : "AXIOMATIC_POLICY_SANDBOX_ERROR",
+    },
+  };
+}
+
 function normalizePublicState(state: InMemoryRuntimeStateV1): InMemoryRuntimeStateV1 {
   canonicalize(state);
   assertObject(state, "runtime state");
@@ -465,6 +522,12 @@ export class InMemoryAgentRuntime {
       fail("AXIOMATIC_PUBLIC_INVALID_SHAPE", "snapshot.runs must be an array");
     }
     const normalizedRuns = snapshot.runs.map((run) => normalizeStoredRun(run));
+    if (normalizedRuns.some((run) => run.policyPlugins !== undefined)) {
+      fail(
+        "AXIOMATIC_POLICY_SANDBOX_SNAPSHOT_UNSUPPORTED",
+        "policy plugin runs require an explicit asynchronous restore protocol",
+      );
+    }
     if (canonicalize(normalizedRuns) !== canonicalize(snapshot.runs)) {
       fail("AXIOMATIC_PUBLIC_SNAPSHOT_NON_CANONICAL", "snapshot.runs are not canonical");
     }
@@ -485,6 +548,13 @@ export class InMemoryAgentRuntime {
 
   run(input: RunInMemoryEvaluationInput): InMemoryEvaluationResult {
     return this.#runNormalized(normalizeRun(input), true);
+  }
+
+  async runWithPolicyPlugins(
+    input: RunWithPolicyPluginsInput,
+    options: PolicyPluginRunOptions = {},
+  ): Promise<InMemoryEvaluationResult> {
+    return this.#runWithPluginsNormalized(normalizePluginRun(input), options, true);
   }
 
   path(head: AxiomaticRevisionRef): readonly AxiomaticRevisionRef[] {
@@ -517,6 +587,12 @@ export class InMemoryAgentRuntime {
   }
 
   snapshot(): InMemoryRuntimeSnapshotV1 {
+    if (this.#runs.some((run) => run.policyPlugins !== undefined)) {
+      fail(
+        "AXIOMATIC_POLICY_SANDBOX_SNAPSHOT_UNSUPPORTED",
+        "policy plugin runs cannot be snapshotted by the synchronous restore API",
+      );
+    }
     return copy({
       version: "in-memory-runtime-snapshot/v1",
       root: this.#root.body,
@@ -529,6 +605,12 @@ export class InMemoryAgentRuntime {
     input: InMemorySnapshotRunV1,
     record: boolean,
   ): InMemoryEvaluationResult {
+    if (input.policyPlugins !== undefined) {
+      fail(
+        "AXIOMATIC_POLICY_SANDBOX_SNAPSHOT_UNSUPPORTED",
+        "use runWithPolicyPlugins for arbitrary policy modules",
+      );
+    }
     this.#runtime.rootOf(input.parent);
     const invocationKey = canonicalize({ source: input.source, position: input.position });
     const invocationValue = canonicalize(input.input);
@@ -620,6 +702,158 @@ export class InMemoryAgentRuntime {
       this.#runtime.completeEvaluation(evaluation, "failed", evaluated.details);
     }
     const adoption = this.#runtime.adoptEvaluation(evaluation, COMPLETE_OUTPUT_ADOPTION);
+    this.#invocationClaims.set(invocationKey, invocationValue);
+    this.#evaluationOccurrenceClaims.set(evaluationClaimKey, evaluationIntent);
+    if (record) this.#runs.push(input);
+    return this.#resultFor(evaluation, adoption)!;
+  }
+
+  async #runWithPluginsNormalized(
+    input: InMemorySnapshotRunV1,
+    options: PolicyPluginRunOptions,
+    record: boolean,
+  ): Promise<InMemoryEvaluationResult> {
+    if (input.policyPlugins === undefined) {
+      fail("AXIOMATIC_POLICY_SANDBOX_INVALID_SPEC", "policyPlugins are required");
+    }
+    this.#runtime.rootOf(input.parent);
+    const invocationKey = canonicalize({ source: input.source, position: input.position });
+    const invocationValue = canonicalize(input.input);
+    const existingInvocation = this.#invocationClaims.get(invocationKey);
+    if (existingInvocation !== undefined && existingInvocation !== invocationValue) {
+      fail(
+        "AXIOMATIC_OCCURRENCE_CONFLICT",
+        "the same invocation source position cannot contain different input",
+      );
+    }
+    const projectionIdentity = effectivePolicyIdentity(input.policyPlugins.projection);
+    const adoptionIdentity = effectivePolicyIdentity(input.policyPlugins.adoption);
+    const evaluationIntentValue = {
+      parent: input.parent,
+      invocation: {
+        source: input.source,
+        position: input.position,
+        input: input.input,
+      },
+      environment: input.environment,
+      evaluator: input.evaluator,
+      projectionPolicy: projectionIdentity,
+      adoptionPolicy: adoptionIdentity,
+    } as unknown as CanonicalValue;
+    const resolvedEvaluationOccurrence = input.evaluationOccurrence ?? {
+      source: "sandboxed-policy/default-evaluation/v1",
+      position: evaluationIntentValue,
+    };
+    const evaluationClaimKey = canonicalize(resolvedEvaluationOccurrence);
+    const evaluationIntent = canonicalize(evaluationIntentValue);
+    const existingIntent = this.#evaluationOccurrenceClaims.get(evaluationClaimKey);
+    if (existingIntent !== undefined && existingIntent !== evaluationIntent) {
+      fail(
+        "AXIOMATIC_EVALUATION_OCCURRENCE_CONFLICT",
+        "the same evaluation occurrence cannot bind a different intent",
+      );
+    }
+
+    const occurrence = this.#runtime.materializeInvocationOccurrence(
+      input.source,
+      input.position,
+      input.input as unknown as CanonicalValue,
+    );
+    const environment = this.#runtime.materializeEnvironment(
+      input.environment as unknown as CanonicalValue,
+    );
+    const endpoint = this.#runtime.materializeEndpoint({
+      version: "offline-sandbox-endpoint/v1",
+      evaluator: input.evaluator,
+      projectionPolicy: projectionIdentity,
+      adoptionPolicy: adoptionIdentity,
+    } as unknown as CanonicalValue);
+    this.#evaluatorsByEndpoint.set(endpoint, input.evaluator);
+
+    const projectionInput = this.#runtime.getProjectionPolicyInput({
+      parent: input.parent,
+      occurrence: occurrence.ref,
+      environment,
+      endpoint,
+      explicitInputs: null,
+    });
+    const projectionResult = await executePolicyPlugin(
+      input.policyPlugins.projection,
+      projectionInput,
+      options.signal,
+    );
+    const evaluationOccurrence = this.#runtime.materializeEvaluationOccurrence(
+      resolvedEvaluationOccurrence.source,
+      resolvedEvaluationOccurrence.position as unknown as CanonicalValue,
+    );
+    const evaluation = this.#runtime.prepareEvaluationFromDraft({
+      parent: input.parent,
+      occurrence: occurrence.ref,
+      evaluationOccurrence: evaluationOccurrence.ref,
+      environment,
+      endpoint,
+      projectionPolicyIdentity: projectionIdentity as PolicyIdentity & { readonly kind: "projection" },
+      explicitInputs: null,
+      draft: projectionResult as ProjectionDraft,
+    });
+    const existing = this.#resultFor(evaluation);
+    if (existing) return existing;
+
+    const projection = this.#runtime.getProjection(
+      this.#runtime.getEvaluation(evaluation).projection,
+    );
+    const request = compileOfflineRequest(
+      this.#runtime,
+      projection,
+      this.#evaluatorsByEndpoint,
+    );
+    this.#requests.set(request.ref, request);
+    this.#runtime.claimEvaluationAttempt(evaluation);
+    const evaluated = executeEvaluator(request.evaluator, request);
+    if (evaluated.kind === "completed") {
+      this.#runtime.recordEmission({
+        evaluation,
+        ordinal: 0,
+        producer: "offline-evaluator/v1",
+        protocol: request.evaluator.kind,
+        payload: evaluated.output as unknown as CanonicalValue,
+      });
+      this.#runtime.completeEvaluation(evaluation, "completed", {
+        version: "offline-outcome/v1",
+        finish: "complete",
+      });
+    } else {
+      this.#runtime.completeEvaluation(evaluation, "failed", evaluated.details);
+    }
+
+    const adoptionInput = this.#runtime.getAdoptionPolicyInput(evaluation);
+    let adoptionResult: AdoptionDecision;
+    try {
+      adoptionResult = await executePolicyPlugin(
+        input.policyPlugins.adoption,
+        adoptionInput,
+        options.signal,
+      ) as AdoptionDecision;
+    } catch (error) {
+      adoptionResult = policyFailureDecision(error);
+    }
+    let adoption: AdoptionResult;
+    try {
+      adoption = this.#runtime.adoptEvaluationDecision(
+        evaluation,
+        adoptionIdentity as PolicyIdentity & { readonly kind: "adoption" },
+        adoptionResult,
+        null,
+      );
+    } catch (error) {
+      if (!(error instanceof SemanticError)) throw error;
+      adoption = this.#runtime.adoptEvaluationDecision(
+        evaluation,
+        adoptionIdentity as PolicyIdentity & { readonly kind: "adoption" },
+        policyFailureDecision(error),
+        null,
+      );
+    }
     this.#invocationClaims.set(invocationKey, invocationValue);
     this.#evaluationOccurrenceClaims.set(evaluationClaimKey, evaluationIntent);
     if (record) this.#runs.push(input);

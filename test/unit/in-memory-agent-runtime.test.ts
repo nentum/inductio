@@ -351,9 +351,17 @@ test("production entry exposes only the offline facade and inert value types", a
   const exported = await import("../../src/index.ts");
   assert.deepEqual(Object.keys(exported).toSorted(), [
     "InMemoryAgentRuntime",
+    "OPENCODE_GO_DEFAULTS",
+    "OpenCodeGoClient",
     "SemanticError",
+    "SqliteAgentRuntime",
+    "compileOpenCodeGoChatRequest",
     "createInMemoryAgentRuntime",
+    "effectivePolicyIdentity",
+    "executePolicyPlugin",
     "inMemoryRuntimeStateRef",
+    "normalizePolicyPlugin",
+    "normalizePolicyPluginPair",
     "restoreInMemoryAgentRuntime",
   ]);
   for (const forbidden of [
@@ -363,6 +371,8 @@ test("production entry exposes only the offline facade and inert value types", a
     "InternalHost",
     "OwnerToken",
     "SqliteConnection",
+    "AxiomaticSqliteConnection",
+    "AxiomaticDurableEngine",
     "TransportSecrets",
     "createProductRuntime",
   ]) {

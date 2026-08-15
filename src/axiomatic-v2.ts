@@ -190,6 +190,25 @@ export interface PrepareEvaluationInput {
   readonly explicitInputs?: CanonicalValue;
 }
 
+export interface ProjectionPolicyContextInput {
+  readonly parent: AxiomaticRevisionRef;
+  readonly occurrence: InvocationOccurrenceRef;
+  readonly environment: AxiomaticArtifactRef;
+  readonly endpoint: AxiomaticArtifactRef;
+  readonly explicitInputs?: CanonicalValue;
+}
+
+export interface PrepareEvaluationFromDraftInput {
+  readonly parent: AxiomaticRevisionRef;
+  readonly occurrence: InvocationOccurrenceRef;
+  readonly evaluationOccurrence?: EvaluationOccurrenceRef;
+  readonly environment: AxiomaticArtifactRef;
+  readonly endpoint: AxiomaticArtifactRef;
+  readonly projectionPolicyIdentity: PolicyIdentity & { readonly kind: "projection" };
+  readonly explicitInputs?: CanonicalValue;
+  readonly draft: ProjectionDraft;
+}
+
 export interface EvaluationAttemptView {
   readonly ref: EvaluationAttemptRef;
   readonly evaluation: EvaluationRunRef;
@@ -773,24 +792,73 @@ export class AxiomaticRuntimeV2 {
         "同一 EvaluationOccurrence 不能绑定不同求值意图",
       );
     }
-    const path = this.path(input.parent);
-    const pathEntries = this.#pathEntries(path);
-    const rootView = this.#rootView(root);
-    const candidateInput = this.#readArtifact(occurrence.payloadRef);
-    const environment = this.#readArtifact(input.environment);
-    const endpoint = this.#readArtifact(input.endpoint);
-    const projectionInput: ProjectionPolicyInput = Object.freeze({
-      root: rootView,
+    const projectionInput = this.getProjectionPolicyInput({
       parent: input.parent,
-      path: pathEntries,
-      candidateInput,
-      environment,
-      endpoint,
+      occurrence: input.occurrence,
+      environment: input.environment,
+      endpoint: input.endpoint,
       explicitInputs,
     });
     const draft = this.#invokePolicy("ProjectionPolicy", () =>
       input.projectionPolicy.project(projectionInput),
     );
+    return this.prepareEvaluationFromDraft({
+      parent: input.parent,
+      occurrence: input.occurrence,
+      evaluationOccurrence: evaluationOccurrence.ref,
+      environment: input.environment,
+      endpoint: input.endpoint,
+      projectionPolicyIdentity: identity as PolicyIdentity & { readonly kind: "projection" },
+      explicitInputs,
+      draft,
+    });
+  }
+
+  prepareEvaluationFromDraft(input: PrepareEvaluationFromDraftInput): EvaluationRunRef {
+    this.#assertPolicyHasNoPower();
+    const root = this.#rootForRevision(input.parent);
+    const occurrence = this.#occurrences.get(input.occurrence);
+    if (!occurrence) fail("AXIOMATIC_UNKNOWN_OCCURRENCE", `未知 InvocationOccurrence ${input.occurrence}`);
+    this.#assertArtifactKind(input.environment, DOMAINS.environment, "environment");
+    this.#assertArtifactKind(input.endpoint, DOMAINS.endpoint, "endpoint");
+    const identity = normalizePolicyIdentity(input.projectionPolicyIdentity);
+    if (identity.kind !== "projection") {
+      fail("AXIOMATIC_INVALID_POLICY", "prepareEvaluationFromDraft 需要 projection policy identity");
+    }
+    const projectionPolicyRef = policyRef(identity);
+    const explicitInputs = input.explicitInputs === undefined ? null : copy(input.explicitInputs);
+    const explicitInputsRef = this.#materialize(DOMAINS.payload, explicitInputs);
+    const intentKey = canonicalize({
+      parent: input.parent,
+      invocation: input.occurrence,
+      environment: input.environment,
+      endpoint: input.endpoint,
+      projectionPolicy: projectionPolicyRef,
+      explicitInputs: explicitInputsRef,
+    } as unknown as CanonicalValue);
+    const evaluationOccurrence = input.evaluationOccurrence === undefined
+      ? this.materializeEvaluationOccurrence("default", {
+          parent: input.parent,
+          invocation: input.occurrence,
+          environment: input.environment,
+          endpoint: input.endpoint,
+          projectionPolicy: projectionPolicyRef,
+          explicitInputs: explicitInputsRef,
+        })
+      : this.#evaluationOccurrences.get(input.evaluationOccurrence);
+    if (!evaluationOccurrence) {
+      fail(
+        "AXIOMATIC_UNKNOWN_EVALUATION_OCCURRENCE",
+        `未知 EvaluationOccurrence ${input.evaluationOccurrence}`,
+      );
+    }
+    const claimedIntent = this.#evaluationOccurrenceIntents.get(evaluationOccurrence.ref);
+    if (claimedIntent !== undefined && claimedIntent !== intentKey) {
+      fail(
+        "AXIOMATIC_EVALUATION_OCCURRENCE_CONFLICT",
+        "同一 EvaluationOccurrence 不能绑定不同求值意图",
+      );
+    }
     const plan = this.#normalizeProjectionPlan({
       root: root.root,
       parent: input.parent,
@@ -800,8 +868,8 @@ export class AxiomaticRuntimeV2 {
       endpoint: input.endpoint,
       policy: projectionPolicyRef,
       explicitInputs: explicitInputsRef,
-      path,
-      draft,
+      path: this.path(input.parent),
+      draft: input.draft,
     });
     const projectionKey = canonicalize({
       root: root.root,
@@ -842,6 +910,62 @@ export class AxiomaticRuntimeV2 {
       }));
     }
     return run;
+  }
+
+  getProjectionPolicyInput(input: ProjectionPolicyContextInput): ProjectionPolicyInput {
+    this.#assertPolicyHasNoPower();
+    const root = this.#rootForRevision(input.parent);
+    const occurrence = this.#occurrences.get(input.occurrence);
+    if (!occurrence) {
+      fail("AXIOMATIC_UNKNOWN_OCCURRENCE", `未知 InvocationOccurrence ${input.occurrence}`);
+    }
+    this.#assertArtifactKind(input.environment, DOMAINS.environment, "environment");
+    this.#assertArtifactKind(input.endpoint, DOMAINS.endpoint, "endpoint");
+    const path = this.path(input.parent);
+    return Object.freeze({
+      root: this.#rootView(root),
+      parent: input.parent,
+      path: this.#pathEntries(path),
+      candidateInput: this.#readArtifact(occurrence.payloadRef),
+      environment: this.#readArtifact(input.environment),
+      endpoint: this.#readArtifact(input.endpoint),
+      explicitInputs: input.explicitInputs === undefined ? null : copy(input.explicitInputs),
+    });
+  }
+
+  getAdoptionPolicyInput(
+    evaluationRef: EvaluationRunRef,
+    explicitInputs: CanonicalValue = null,
+  ): AdoptionPolicyInput {
+    this.#assertPolicyHasNoPower();
+    const evaluation = this.#evaluation(evaluationRef);
+    const status = this.#evaluationStatus(evaluation);
+    if (
+      (status !== "completed" && status !== "failed") ||
+      !this.#outcomeFor(evaluation.ref)
+    ) {
+      fail(
+        "AXIOMATIC_EVALUATION_NOT_ADOPTABLE",
+        "只有具有明确外部 Outcome 的 Evaluation 才能交给采纳政策",
+      );
+    }
+    const root = this.#roots.get(evaluation.root);
+    const projection = this.#plans.get(evaluation.projection);
+    const occurrence = this.#occurrences.get(evaluation.occurrence);
+    if (!root || !projection || !occurrence) {
+      fail("AXIOMATIC_CORRUPT_STATE", "AdoptionPolicy 输入的账本关系缺失");
+    }
+    const explicitInputsCopy = copy(explicitInputs);
+    return Object.freeze({
+      evaluation: this.#evaluationView(evaluation),
+      root: this.#rootView(root),
+      parent: evaluation.parent,
+      candidateInput: this.#readArtifact(occurrence.payloadRef),
+      projection: this.#projectionView(projection),
+      emissions: this.#emissionsFor(evaluation.ref),
+      outcome: this.#outcomeFor(evaluation.ref)!,
+      explicitInputs: explicitInputsCopy,
+    });
   }
 
   failEvaluationLocally(
@@ -1053,6 +1177,30 @@ export class AxiomaticRuntimeV2 {
     explicitInputs: CanonicalValue = null,
   ): AdoptionResult {
     this.#assertPolicyHasNoPower();
+    const identity = normalizePolicyIdentity(policy.identity);
+    if (identity.kind !== "adoption" || typeof policy.adopt !== "function") {
+      fail("AXIOMATIC_INVALID_POLICY", "adoptEvaluation 需要 adoption policy");
+    }
+    const explicitInputsCopy = copy(explicitInputs);
+    const adoptionInput = this.getAdoptionPolicyInput(evaluationRef, explicitInputsCopy);
+    const decision = normalizeDecision(
+      this.#invokePolicy("AdoptionPolicy", () => policy.adopt(adoptionInput)),
+    );
+    return this.adoptEvaluationDecision(
+      evaluationRef,
+      identity as PolicyIdentity & { readonly kind: "adoption" },
+      decision,
+      explicitInputsCopy,
+    );
+  }
+
+  adoptEvaluationDecision(
+    evaluationRef: EvaluationRunRef,
+    policyIdentity: PolicyIdentity & { readonly kind: "adoption" },
+    decision: AdoptionDecision,
+    explicitInputs: CanonicalValue = null,
+  ): AdoptionResult {
+    this.#assertPolicyHasNoPower();
     const evaluation = this.#evaluation(evaluationRef);
     const status = this.#evaluationStatus(evaluation);
     if (
@@ -1061,12 +1209,12 @@ export class AxiomaticRuntimeV2 {
     ) {
       fail(
         "AXIOMATIC_EVALUATION_NOT_ADOPTABLE",
-        "只有具有明确外部 Outcome 的 Evaluation 才能交给采纳政策",
+        "只有具有明确外部 Outcome 的 Evaluation 才能提交采纳决定",
       );
     }
-    const identity = normalizePolicyIdentity(policy.identity);
-    if (identity.kind !== "adoption" || typeof policy.adopt !== "function") {
-      fail("AXIOMATIC_INVALID_POLICY", "adoptEvaluation 需要 adoption policy");
+    const identity = normalizePolicyIdentity(policyIdentity);
+    if (identity.kind !== "adoption") {
+      fail("AXIOMATIC_INVALID_POLICY", "adoptEvaluationDecision 需要 adoption policy identity");
     }
     const adoptionPolicyRef = policyRef(identity);
     const explicitInputsCopy = copy(explicitInputs);
@@ -1077,30 +1225,14 @@ export class AxiomaticRuntimeV2 {
       policy: adoptionPolicyRef,
       explicitInputs: explicitInputsRef,
     } as unknown as CanonicalValue);
-    const root = this.#roots.get(evaluation.root)!;
-    const projection = this.#plans.get(evaluation.projection)!;
-    const occurrence = this.#occurrences.get(evaluation.occurrence)!;
-    const adoptionInput: AdoptionPolicyInput = Object.freeze({
-      evaluation: this.#evaluationView(evaluation),
-      root: this.#rootView(root),
-      parent: evaluation.parent,
-      candidateInput: this.#readArtifact(occurrence.payloadRef),
-      projection: this.#projectionView(projection),
-      emissions: this.#emissionsFor(evaluation.ref),
-      outcome: this.#outcomeFor(evaluation.ref)!,
-      explicitInputs: explicitInputsCopy,
-    });
-    const decision = normalizeDecision(
-      this.#invokePolicy("AdoptionPolicy", () => policy.adopt(adoptionInput)),
-    );
-    const decisionValue = decision as unknown as CanonicalValue;
+    const normalizedDecision = normalizeDecision(decision);
     const decisionRef = contentRef(DOMAINS.decision, objectValue({
       version: "adoption-decision/v2",
       evaluation: evaluation.ref,
       parent: evaluation.parent,
       policy: adoptionPolicyRef,
       explicitInputs: explicitInputsRef,
-      decision: decisionValue,
+      decision: normalizedDecision as unknown as CanonicalValue,
     }));
     const existing = this.#adoptions.get(key);
     if (existing) {
@@ -1110,8 +1242,8 @@ export class AxiomaticRuntimeV2 {
       return this.#adoptionView(existing);
     }
     let node: NodeView | undefined;
-    if (decision.kind === "adopt") {
-      node = this.#appendNode(evaluation.parent, decision.block);
+    if (normalizedDecision.kind === "adopt") {
+      node = this.#appendNode(evaluation.parent, normalizedDecision.block);
     }
     const result: AdoptionResult = Object.freeze({
       key,
@@ -1120,7 +1252,7 @@ export class AxiomaticRuntimeV2 {
       policy: adoptionPolicyRef,
       explicitInputs: explicitInputsRef,
       decisionRef,
-      decision,
+      decision: normalizedDecision,
       ...(node === undefined ? {} : { node }),
     });
     this.#adoptions.set(key, result);

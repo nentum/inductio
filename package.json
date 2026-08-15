@@ -1,10 +1,10 @@
 {
   "name": "inductio",
-  "version": "0.1.0",
-  "description": "Content-addressed, policy-bounded Agent semantics with a deterministic offline in-memory runtime.",
+  "version": "0.3.0",
+  "description": "Content-addressed, policy-bounded Agent semantics: axiomatic core, isolated policy sandbox, durable SQLite command ledger, and an OpenAI-compatible provider transport.",
   "private": false,
   "type": "module",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "sideEffects": false,
   "packageManager": "npm@10.9.8",
   "engines": {
@@ -29,6 +29,7 @@
   "files": [
     "dist/index.js",
     "dist/index.d.ts",
+    "schema/003-axiomatic-v2.sql",
     "README.md",
     "RELEASE-SCOPE.md"
   ],
@@ -40,14 +41,19 @@
     "content-addressed",
     "deterministic",
     "runtime",
+    "sqlite",
     "semantics"
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "node scripts/build-package.ts",
     "test:axiomatic": "node --test --test-reporter=spec test/unit/axiomatic-v2.test.ts",
-    "test:public": "node --test --test-reporter=spec test/unit/in-memory-agent-runtime.test.ts",
-    "test": "npm run test:axiomatic && npm run test:public",
+    "test:public": "node --test --test-reporter=spec test/unit/in-memory-agent-runtime.test.ts test/unit/policy-sandbox.test.ts test/unit/policy-plugin-runtime.test.ts",
+    "test:unit": "node --test --test-reporter=spec test/unit/*.test.ts",
+    "test:multiprocess": "node --test --test-reporter=spec test/multiprocess/*.test.ts",
+    "test:crash": "node --test --test-reporter=spec test/crash/*.test.ts",
+    "test:live:opencode-go": "node --test --test-reporter=spec test/live-opencode-go.test.ts",
+    "test": "npm run test:unit && npm run test:multiprocess && npm run test:crash",
     "package:check": "node scripts/package-check.ts",
     "release:check": "npm run typecheck && npm run test && npm run build && npm run package:check",
     "prepack": "npm run build",
