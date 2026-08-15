@@ -1,26 +1,22 @@
 # Inductio
 
-> **引导进入。** 拉丁语 `inducere`（引导进入）的名词形式——投影政策把历史**引入**求值上下文，采纳政策把结果**引入**语义树。
-
-Inductio 是 agent 语义的公理化核心：**agent 不是一个人，没有记忆；agent 是一个根节点加上挂在根上的求值历史树。**
+Inductio 是一个typescript库，服务基于 LLM 的 agent 系统。但它并非试图提供更好的agent框架，而是尝试提供一个更好的地基，从而提升agent框架的上限。
 
 ## 核心理念
 
-- **agent = 根 + 树**：agent 是根相同的所有节点的并集。树的生长 = 不断 append 求值结果，不是设计预演。
-- **单次求值 = 一次完整的求值调用**：模型是无状态函数，agent 的连续性来自外部化的求值历史，不来自内部记忆。
-- **内容寻址**：`node := hash(parent, block)`——相同内容收敛为相同节点；引用即快照；结构共享。
-- **执行与语义分离**：Emission/Outcome（发生了什么）先落账本，Node（是什么语义）只保存政策认定的语义块。
-- **命令账本**：SQLite 只存"发生了什么"（append-only 命令，event sourcing）；状态 = 重放。账本线性、树分叉、CAS 裁判、崩溃后幂等重放。
+- 目前来说，大模型与人类的智能形态差异较大，因此inductio希望尽可能地从机械的视角看待大模型。例如，Inductio将大模型的`最小工作单位`定位为一次api调用，而非一次prompt。
 
-## 当前状态（0.4.0）
+- `agent个体`的定义锚定在一个不可变的`内容节点`；最终引用这一不可变内容节点的所有内容节点构成一个agent个体。也就是说，它原生并强烈支持fork。
 
-- ✅ 公理语义核心：Root / Node / 树 / Projection / Emission / Adoption / Evaluation
-- ✅ 离线内存运行时 + 政策插件沙箱（ESM-only、SHA-pinned、子进程隔离）
-- ✅ SQLite 命令账本：append-only、事务原子性、投影审计、崩溃恢复（OS-kill 三切点证明）
-- ✅ **多 provider transport**：统一 `ModelAdapter` 契约 + 三个内置适配器：
-  `openai-chat-completions/v1`、`openai-responses/v1`、`anthropic-messages/v1`
-- ✅ 账本版本化：`model-endpoint/v2` / `axiomatic-model-request/v2`，v1 格式保留兼容
-- ✅ 跨 OS 字节一致 CI + conformance suite（preflight/secret/错误分类/crash cut/no-retry）
+- `账本`系统，一切可审计。
+
+- `内容寻址`驱动。
+
+- 细粒度`事件追踪`，崩溃后可沿账本重放还原状态。
+
+- `引用`动作被定义为提取当前快照，不干扰系统正常运行。
+
+- `乐观锁`当裁判，基于过期版本的写入会被拒绝
 
 ## 使用
 
@@ -36,19 +32,31 @@ npm run release:check     # typecheck + test + build + package check
 ## 公开 API（0.4.0）
 
 ```ts
-import { InMemoryAgentRuntime, SqliteAgentRuntime, executePolicyPlugin } from "inductio";
+import { createInMemoryAgentRuntime, SqliteAgentRuntime } from "inductio";
 
-// 离线（确定性）
-const memory = createInMemoryAgentRuntime({ rootPrompt: "...", evaluator: { version: "offline-evaluator/v1", kind: "echo" } });
+// 离线（确定性，不接真实模型）
+const memory = createInMemoryAgentRuntime({
+  rootPrompt: "...",
+  evaluator: { version: "offline-evaluator/v1", kind: "echo" },
+});
 
 // 生产（命令账本 + 真实模型，多 provider）
 const durable = SqliteAgentRuntime.open("./agent.db", { rootPrompt: "...", toolDefinitions: [] }, {
-  provider: "anthropic",            // 或 "openai" / "opencode-go"
+  provider: "anthropic",            // openai / opencode-go / anthropic
   adapter: "anthropic-messages/v1", // 或 openai-chat-completions/v1 / openai-responses/v1
   model: "claude-...",
-  apiKeyEnv: "ANTHROPIC_API_KEY",   // 密钥只在 dispatch 时读取，不进账本
+  // 密钥从固定环境变量读取（anthropic→ANTHROPIC_API_KEY，openai→OPENAI_API_KEY，
+  // opencode-go→OPENCODE_GO），只在请求发出时读取，不进账本、不落盘
 });
-const result = await durable.run({ input: [...], signal });
+
+const result = await durable.run({
+  parent: durable.root().ref,       // 从根开始第一次求值
+  source: "demo",                  // 输入来源标识
+  position: { seq: 1 },             // 来源位置（内容寻址，重复位置同输入幂等）
+  input: [{ kind: "message", role: "user", content: "你好" }],
+  signal,                           // 可选的 AbortSignal
+});
+
 durable.close();
 ```
 
@@ -69,21 +77,12 @@ schema/003-axiomatic-v2.sql           命令账本 schema
 test/unit|multiprocess|crash|live     语义/并发/崩溃恢复/真实模型验证
 ```
 
-## 扩展点（想象力所在）
+## 致歉
 
-- **投影政策**（沙箱）：`{root,parent,path,candidateInput,env,endpoint} → {selectedNodes, appendContent}`
-- **采纳政策**（沙箱）：`{evaluation,emissions,outcome,projection} → adopt{block} | reject{reason}`
-- **适配器**（内部注册）：`preflight → PreparedCall; dispatch(signal) → Completion; classify(err)`
-- **世界入口**：`run({input, environment})`——模型输出只经采纳政策进树
+由于本项目几乎完全由AI执行落地，内容和代码可能存在难以理解的地方（例如标识符的设置）。
 
-## 硬边界
+敬请谅解，我会持续优化。
 
-- 政策无权力：DTO-only、沙箱（无 import/fs/net/clock、同步、超时、内存限额）
-- 账本只追加：无 update/delete；重放结果必须与记录结果一致（防篡改）
-- tool_calls 是语义文本，从不执行；无能力/副作用
-- 一个 SQLite 文件 = 一个 agent；N 个 agent = N 个文件（产品面 Map + 懒加载）
-- 密钥只在 dispatch 读取（环境变量），永不进账本/快照/错误
-
-## 许可证
+## 开源协议
 
 [MIT](LICENSE)
