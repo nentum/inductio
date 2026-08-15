@@ -8,7 +8,7 @@ Inductio 是一个 TypeScript 库，服务于基于 LLM 的 agent 系统。但�
 
 - 目前来说，大模型与人类的智能形态差异较大，因此 Inductio 希望尽可能从机械的视角看待大模型。例如，Inductio 将一次完整的模型求值作为最小工作单位，而不是把一段 prompt 当作 agent 本身。
 
-- agent 个体锚定在一个不可变的 Root。所有从该 Root 沿单一 parent 链合法生长出的内容节点，共同构成一个 agent。也就是说，它原生并强烈支持 fork。
+- agent 个体锚定在一个不可变的 Root。所有从该 Root 沿单一 parent 链合法生长出的内容节点，共同构成一个 agent。也就是说，它原生并强烈支持 branch。
 
 - 账本系统。关键执行过程先记录，再推进状态，尽可能做到一切有据可查。
 
