@@ -25,11 +25,19 @@ import {
   type SemanticBlock,
   type SemanticItem,
 } from "./axiomatic-v2.ts";
+import type {
+  AxiomaticModelRequestV2,
+  DurableProviderRequest,
+  ModelAdapterId,
+  ModelEndpointV2,
+  ModelProviderId,
+} from "./model-contract.ts";
 import type { CanonicalObject, CanonicalValue } from "./types.ts";
 
 const COMMAND_DOMAIN = "axiomatic-command/v1";
 const DURABLE_STATE_DOMAIN = "axiomatic-durable-state/v1";
-const PROVIDER_REQUEST_DOMAIN = "axiomatic-provider-request/v1";
+const LEGACY_PROVIDER_REQUEST_DOMAIN = "axiomatic-provider-request/v1";
+const MODEL_REQUEST_DOMAIN = "axiomatic-model-request/v2";
 const COMMAND_VERSION = "axiomatic-command/v1" as const;
 const REF = /^sha256:[0-9a-f]{64}$/;
 
@@ -89,19 +97,19 @@ export interface AxiomaticProviderRequestV1 {
 export interface PreparedDurableEvaluation {
   readonly evaluation: EvaluationRunRef;
   readonly projection: ProjectionPlanView;
-  readonly request: AxiomaticProviderRequestV1;
+  readonly request: DurableProviderRequest;
 }
 
 export interface DurableStateView {
   readonly version: "axiomatic-durable-state/v1";
   readonly ledger: AxiomaticStateView;
   readonly materialRefs: readonly string[];
-  readonly requests: readonly AxiomaticProviderRequestV1[];
+  readonly requests: readonly DurableProviderRequest[];
 }
 
 interface ReplayState {
   readonly runtime: AxiomaticRuntimeV2;
-  readonly requests: Map<string, AxiomaticProviderRequestV1>;
+  readonly requests: Map<string, DurableProviderRequest>;
   readonly materials: Map<string, CanonicalValue>;
 }
 
@@ -194,7 +202,7 @@ function commandRef(envelope: CommandEnvelope): string {
   return contentRef(COMMAND_DOMAIN, envelope as unknown as CanonicalValue);
 }
 
-function sortedRequests(requests: ReadonlyMap<string, AxiomaticProviderRequestV1>): readonly AxiomaticProviderRequestV1[] {
+function sortedRequests(requests: ReadonlyMap<string, DurableProviderRequest>): readonly DurableProviderRequest[] {
   return Object.freeze(
     [...requests.values()].toSorted((left, right) =>
       Buffer.from(left.ref, "utf8").compare(Buffer.from(right.ref, "utf8")),
@@ -285,24 +293,75 @@ function endpointValue(state: ReplayState, endpoint: string): CanonicalObject {
   return value as CanonicalObject;
 }
 
+function isProvider(value: unknown): value is ModelProviderId {
+  return value === "opencode-go" || value === "openai" || value === "anthropic";
+}
+
+function isAdapter(value: unknown): value is ModelAdapterId {
+  return value === "openai-chat-completions/v1" ||
+    value === "openai-responses/v1" ||
+    value === "anthropic-messages/v1";
+}
+
+function validProviderAdapter(provider: ModelProviderId, adapter: ModelAdapterId): boolean {
+  return (provider === "opencode-go" && adapter === "openai-chat-completions/v1") ||
+    (provider === "openai" && (
+      adapter === "openai-chat-completions/v1" || adapter === "openai-responses/v1"
+    )) ||
+    (provider === "anthropic" && adapter === "anthropic-messages/v1");
+}
+
+function validateModelEndpoint(value: CanonicalObject): asserts value is CanonicalObject & ModelEndpointV2 {
+  const fields = value.maxTokens === undefined
+    ? ["version", "provider", "adapter", "baseUrl", "model"]
+    : ["version", "provider", "adapter", "baseUrl", "model", "maxTokens"];
+  exact(value, fields, "model endpoint");
+  const maxTokens = value.maxTokens;
+  if (
+    value.version !== "model-endpoint/v2" ||
+    !isProvider(value.provider) ||
+    !isAdapter(value.adapter) ||
+    !validProviderAdapter(value.provider, value.adapter) ||
+    typeof value.baseUrl !== "string" ||
+    value.baseUrl.length === 0 ||
+    typeof value.model !== "string" ||
+    value.model.length === 0 ||
+    (maxTokens !== undefined && (
+      typeof maxTokens !== "number" ||
+      !Number.isSafeInteger(maxTokens) ||
+      maxTokens < 1 ||
+      maxTokens > 1_000_000
+    ))
+  ) {
+    fail("AXIOMATIC_DURABLE_INVALID_ENDPOINT", "endpoint is not a supported model endpoint/v2");
+  }
+  let url: URL;
+  try {
+    url = new URL(value.baseUrl);
+  } catch {
+    fail("AXIOMATIC_DURABLE_INVALID_ENDPOINT", "model endpoint baseUrl is invalid");
+  }
+  if (
+    url.protocol !== "https:" ||
+    url.username.length > 0 ||
+    url.password.length > 0 ||
+    url.search.length > 0 ||
+    url.hash.length > 0 ||
+    !value.baseUrl.endsWith("/") ||
+    url.toString() !== value.baseUrl
+  ) {
+    fail("AXIOMATIC_DURABLE_INVALID_ENDPOINT", "model endpoint baseUrl is not canonical HTTPS");
+  }
+}
+
 function compileProviderRequest(
   state: ReplayState,
   evaluationRef: EvaluationRunRef,
-): AxiomaticProviderRequestV1 {
+): DurableProviderRequest {
   const evaluation = state.runtime.getEvaluation(evaluationRef);
   const projection = state.runtime.getProjection(evaluation.projection);
   const root = state.runtime.rootOf(evaluation.parent);
   const endpoint = endpointValue(state, projection.endpoint);
-  if (
-    endpoint.version !== "opencode-go-endpoint/v1" ||
-    endpoint.provider !== "opencode-go" ||
-    typeof endpoint.baseUrl !== "string" ||
-    endpoint.baseUrl.length === 0 ||
-    typeof endpoint.model !== "string" ||
-    endpoint.model.length === 0
-  ) {
-    fail("AXIOMATIC_DURABLE_INVALID_ENDPOINT", "endpoint is not an OpenCode Go endpoint/v1");
-  }
   object(projection.appendContent, "ProjectionPlan.appendContent");
   exact(
     projection.appendContent,
@@ -321,27 +380,57 @@ function compileProviderRequest(
     fail(STORAGE_CODES.CORRUPT, "ProjectionPlan history does not match selectedNodes");
   }
   const candidateInput = normalizeInput(projection.appendContent.candidateInput);
+  const modelInput = {
+    version: "axiomatic-model-input/v1" as const,
+    history,
+    candidateInput,
+    environment: copy(projection.appendContent.environment as CanonicalValue),
+  };
+  if (endpoint.version === "opencode-go-endpoint/v1") {
+    exact(endpoint, ["version", "provider", "baseUrl", "model"], "legacy endpoint");
+    if (
+      endpoint.provider !== "opencode-go" ||
+      typeof endpoint.baseUrl !== "string" ||
+      endpoint.baseUrl.length === 0 ||
+      typeof endpoint.model !== "string" ||
+      endpoint.model.length === 0
+    ) {
+      fail("AXIOMATIC_DURABLE_INVALID_ENDPOINT", "endpoint is not an OpenCode Go endpoint/v1");
+    }
+    const value = {
+      version: "axiomatic-provider-request/v1" as const,
+      evaluation: evaluationRef,
+      projection: projection.ref,
+      endpoint: projection.endpoint,
+      provider: "opencode-go" as const,
+      baseUrl: endpoint.baseUrl,
+      model: endpoint.model,
+      root: root.body,
+      modelInput,
+    };
+    return Object.freeze(copy({
+      ref: contentRef(LEGACY_PROVIDER_REQUEST_DOMAIN, value as unknown as CanonicalValue),
+      ...value,
+    } as unknown as CanonicalValue) as unknown as AxiomaticProviderRequestV1);
+  }
+  validateModelEndpoint(endpoint);
   const value = {
-    version: "axiomatic-provider-request/v1" as const,
+    version: "axiomatic-model-request/v2" as const,
     evaluation: evaluationRef,
     projection: projection.ref,
     endpoint: projection.endpoint,
-    provider: "opencode-go" as const,
+    provider: endpoint.provider,
+    adapter: endpoint.adapter,
     baseUrl: endpoint.baseUrl,
     model: endpoint.model,
+    ...(endpoint.maxTokens === undefined ? {} : { maxTokens: endpoint.maxTokens }),
     root: root.body,
-    modelInput: {
-      version: "axiomatic-model-input/v1" as const,
-      history,
-      candidateInput,
-      environment: copy(projection.appendContent.environment as CanonicalValue),
-    },
+    modelInput,
   };
-  const request = copy({
-    ref: contentRef(PROVIDER_REQUEST_DOMAIN, value as unknown as CanonicalValue),
+  return Object.freeze(copy({
+    ref: contentRef(MODEL_REQUEST_DOMAIN, value as unknown as CanonicalValue),
     ...value,
-  } as unknown as CanonicalValue) as unknown as AxiomaticProviderRequestV1;
-  return Object.freeze(request);
+  } as unknown as CanonicalValue) as unknown as AxiomaticModelRequestV2);
 }
 
 function resultValue(value: unknown): CanonicalValue {
@@ -592,10 +681,36 @@ export class AxiomaticDurableEngine {
     return durableStateRef(this.#state);
   }
 
-  request(refValue: string): AxiomaticProviderRequestV1 {
+  request(refValue: string): DurableProviderRequest {
     const request = this.#state.requests.get(refValue);
     if (!request) fail("AXIOMATIC_DURABLE_UNKNOWN_REQUEST", `unknown provider request ${refValue}`);
-    return copy(request as unknown as CanonicalValue) as unknown as AxiomaticProviderRequestV1;
+    return copy(request as unknown as CanonicalValue) as unknown as DurableProviderRequest;
+  }
+
+  /** Returns the latest persisted endpoint binding for restart configuration. */
+  modelEndpoint(): ModelEndpointV2 | undefined {
+    for (const record of [...this.#records].toReversed()) {
+      if (record.envelope.kind !== "record-request") continue;
+      const request = record.result as unknown as DurableProviderRequest;
+      if (request.version === "axiomatic-model-request/v2") {
+        return Object.freeze({
+          version: "model-endpoint/v2",
+          provider: request.provider,
+          adapter: request.adapter,
+          baseUrl: request.baseUrl,
+          model: request.model,
+          ...(request.maxTokens === undefined ? {} : { maxTokens: request.maxTokens }),
+        });
+      }
+      return Object.freeze({
+        version: "model-endpoint/v2",
+        provider: "opencode-go",
+        adapter: "openai-chat-completions/v1",
+        baseUrl: request.baseUrl,
+        model: request.model,
+      });
+    }
+    return undefined;
   }
 
   evaluation(refValue: EvaluationRunRef): EvaluationView {
@@ -606,7 +721,7 @@ export class AxiomaticDurableEngine {
     return this.#state.runtime.path(head);
   }
 
-  prepareOpenCodeEvaluation(input: {
+  prepareEvaluation(input: {
     readonly parent: AxiomaticRevisionRef;
     readonly source: string;
     readonly position: CanonicalValue;
@@ -621,14 +736,17 @@ export class AxiomaticDurableEngine {
     const candidateInput = normalizeInput(input.input);
     this.#state.runtime.rootOf(input.parent);
     object(input.endpoint, "endpoint");
-    exact(input.endpoint, ["version", "provider", "baseUrl", "model"], "endpoint");
-    if (
-      input.endpoint.version !== "opencode-go-endpoint/v1" ||
-      input.endpoint.provider !== "opencode-go" ||
-      typeof input.endpoint.baseUrl !== "string" ||
-      typeof input.endpoint.model !== "string"
-    ) {
-      fail("AXIOMATIC_DURABLE_INVALID_ENDPOINT", "endpoint is not an OpenCode Go endpoint/v1");
+    if (input.endpoint.version === "opencode-go-endpoint/v1") {
+      exact(input.endpoint, ["version", "provider", "baseUrl", "model"], "legacy endpoint");
+      if (
+        input.endpoint.provider !== "opencode-go" ||
+        typeof input.endpoint.baseUrl !== "string" ||
+        typeof input.endpoint.model !== "string"
+      ) {
+        fail("AXIOMATIC_DURABLE_INVALID_ENDPOINT", "endpoint is not an OpenCode Go endpoint/v1");
+      }
+    } else {
+      validateModelEndpoint(input.endpoint);
     }
     const occurrence = this.#execute("materialize-invocation", {
       source: input.source,
@@ -642,7 +760,9 @@ export class AxiomaticDurableEngine {
       value: input.endpoint,
     }) as string;
     const evaluationPosition = input.evaluationOccurrence ?? {
-      source: "opencode-go/default-evaluation/v1",
+      source: input.endpoint.version === "opencode-go-endpoint/v1"
+        ? "opencode-go/default-evaluation/v1"
+        : "model/default-evaluation/v2",
       position: {
         parent: input.parent,
         invocation: occurrence.ref,
@@ -677,7 +797,7 @@ export class AxiomaticDurableEngine {
       explicitInputs: null,
       draft,
     } as unknown as CanonicalValue) as string;
-    const request = this.#execute("record-request", { evaluation }) as unknown as AxiomaticProviderRequestV1;
+    const request = this.#execute("record-request", { evaluation }) as unknown as DurableProviderRequest;
     return Object.freeze({
       evaluation,
       projection: this.#state.runtime.getProjection(
@@ -685,6 +805,22 @@ export class AxiomaticDurableEngine {
       ),
       request,
     });
+  }
+
+  /** Historical v1 compatibility alias; new callers use prepareEvaluation. */
+  prepareOpenCodeEvaluation(input: {
+    readonly parent: AxiomaticRevisionRef;
+    readonly source: string;
+    readonly position: CanonicalValue;
+    readonly input: readonly SemanticItem[];
+    readonly environment: CanonicalValue;
+    readonly endpoint: CanonicalObject;
+    readonly evaluationOccurrence?: {
+      readonly source: string;
+      readonly position: CanonicalValue;
+    };
+  }): PreparedDurableEvaluation {
+    return this.prepareEvaluation(input);
   }
 
   claimAttempt(evaluation: EvaluationRunRef): EvaluationView {

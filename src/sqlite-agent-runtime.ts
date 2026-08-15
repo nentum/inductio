@@ -1,16 +1,21 @@
 import {
   AxiomaticDurableEngine,
-  type AxiomaticProviderRequestV1,
   type DurableStateView,
+  type PreparedDurableEvaluation,
 } from "./axiomatic-durable-engine.ts";
 import { AxiomaticSqliteConnection, type AxiomaticSqliteOpenOptions } from "./axiomatic-sqlite-connection.ts";
 import { SemanticError, STORAGE_CODES } from "./errors.ts";
 import {
-  OpenCodeGoClient,
-  type OpenCodeGoClientOptions,
-  type OpenCodeGoCompletionV1,
-  type OpenCodeGoModelRequestV1,
-} from "./opencode-go-client.ts";
+  createBuiltInModelAdapter,
+  type BuiltInAdapterOptions,
+} from "./model-adapters.ts";
+import type { ModelInputV1, ModelAdapter } from "./model-adapter.ts";
+import type {
+  DurableProviderRequest,
+  ModelEndpointV2,
+  AxiomaticModelRequestV2,
+} from "./model-contract.ts";
+import { isAxiomaticModelRequestV2, modelRequestMatchesEndpoint } from "./model-contract.ts";
 import type {
   AdoptionResult,
   AxiomaticRevisionRef,
@@ -21,17 +26,9 @@ import type {
   RootView,
   SemanticItem,
 } from "./axiomatic-v2.ts";
-import type { CanonicalValue } from "./types.ts";
+import type { CanonicalObject, CanonicalValue } from "./types.ts";
 
-const ENDPOINT_VERSION = "opencode-go-endpoint/v1" as const;
-const PROTOCOL = "opencode-go-chat-completions/v1";
-
-export interface SqliteAgentRuntimeOptions extends AxiomaticSqliteOpenOptions {
-  readonly baseUrl?: string;
-  readonly model?: string;
-  readonly timeoutMs?: number;
-  readonly userAgent?: string;
-}
+export type SqliteAgentRuntimeOptions = AxiomaticSqliteOpenOptions & BuiltInAdapterOptions;
 
 export interface SqliteAgentRunInput {
   readonly parent: AxiomaticRevisionRef;
@@ -51,7 +48,7 @@ export interface SqliteAgentRunResult {
   readonly parent: AxiomaticRevisionRef;
   readonly head: AxiomaticRevisionRef;
   readonly evaluation: EvaluationRunRef;
-  readonly request: AxiomaticProviderRequestV1;
+  readonly request: DurableProviderRequest;
   readonly output: readonly SemanticItem[];
   readonly adoption?: AdoptionResult;
   readonly errorCode?: string;
@@ -61,19 +58,18 @@ function fail(code: string, message: string): never {
   throw new SemanticError(code, message);
 }
 
-function isDefinitiveProviderFailure(error: SemanticError): boolean {
+function isDefinitiveModelFailure(error: SemanticError): boolean {
   return (
-    error.code === "OPENCODE_GO_HTTP" ||
-    error.code === "OPENCODE_GO_PROTOCOL" ||
-    error.code === "OPENCODE_GO_UNSUPPORTED_TOOL_CALL" ||
-    error.code === "OPENCODE_GO_RESPONSE_LIMIT"
+    error.code === "MODEL_HTTP" ||
+    error.code === "MODEL_PROTOCOL" ||
+    error.code === "MODEL_UNSUPPORTED_TOOL_CALL" ||
+    error.code === "MODEL_RESPONSE_LIMIT"
   );
 }
 
-function providerRequest(request: AxiomaticProviderRequestV1): OpenCodeGoModelRequestV1 {
+function modelInput(request: AxiomaticModelRequestV2): ModelInputV1 {
   return {
-    version: "opencode-go-model-request/v1",
-    model: request.model,
+    version: "axiomatic-model-input/v1",
     root: request.root,
     history: request.modelInput.history,
     candidateInput: request.modelInput.candidateInput,
@@ -81,14 +77,45 @@ function providerRequest(request: AxiomaticProviderRequestV1): OpenCodeGoModelRe
   };
 }
 
+function adapterOptionsFromEndpoint(
+  endpoint: ModelEndpointV2,
+  options: Pick<SqliteAgentRuntimeOptions, "timeoutMs" | "userAgent">,
+): BuiltInAdapterOptions {
+  const common = {
+    baseUrl: endpoint.baseUrl,
+    model: endpoint.model,
+    ...(endpoint.maxTokens === undefined ? {} : { maxTokens: endpoint.maxTokens }),
+    ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+    ...(options.userAgent === undefined ? {} : { userAgent: options.userAgent }),
+  };
+  switch (endpoint.provider) {
+    case "opencode-go":
+      if (endpoint.adapter !== "openai-chat-completions/v1") {
+        fail("AXIOMATIC_ENDPOINT_MISMATCH", "OpenCode Go endpoint has an invalid adapter");
+      }
+      return { ...common, provider: endpoint.provider, adapter: endpoint.adapter };
+    case "openai":
+      if (endpoint.adapter !== "openai-chat-completions/v1" && endpoint.adapter !== "openai-responses/v1") {
+        fail("AXIOMATIC_ENDPOINT_MISMATCH", "OpenAI endpoint has an invalid adapter");
+      }
+      return { ...common, provider: endpoint.provider, adapter: endpoint.adapter };
+    case "anthropic":
+      if (endpoint.adapter !== "anthropic-messages/v1") {
+        fail("AXIOMATIC_ENDPOINT_MISMATCH", "Anthropic endpoint has an invalid adapter");
+      }
+      return { ...common, provider: endpoint.provider, adapter: endpoint.adapter };
+  }
+}
+
 /**
- * Public durable facade. It exposes no SQLite handle, owner token, policy
- * callback, transport secret, or core write port.
+ * Public durable facade. The provider is selected declaratively; raw SQLite,
+ * transport clients, fetch callbacks, credential resolvers, and core ports are
+ * intentionally not part of this surface.
  */
 export class SqliteAgentRuntime {
   readonly #connection: AxiomaticSqliteConnection;
   readonly #engine: AxiomaticDurableEngine;
-  readonly #client: OpenCodeGoClient;
+  readonly #adapter: ModelAdapter;
   #closed = false;
   #running = false;
   #activeController: AbortController | undefined;
@@ -96,11 +123,11 @@ export class SqliteAgentRuntime {
   private constructor(
     connection: AxiomaticSqliteConnection,
     engine: AxiomaticDurableEngine,
-    client: OpenCodeGoClient,
+    adapter: ModelAdapter,
   ) {
     this.#connection = connection;
     this.#engine = engine;
-    this.#client = client;
+    this.#adapter = adapter;
   }
 
   static open(
@@ -108,19 +135,22 @@ export class SqliteAgentRuntime {
     root?: AxiomaticRootBody,
     options: SqliteAgentRuntimeOptions = {},
   ): SqliteAgentRuntime {
-    const clientOptions: OpenCodeGoClientOptions = {
-      ...(options.baseUrl === undefined ? {} : { baseUrl: options.baseUrl }),
-      ...(options.model === undefined ? {} : { model: options.model }),
-      ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
-      ...(options.userAgent === undefined ? {} : { userAgent: options.userAgent }),
-    };
-    const client = new OpenCodeGoClient(clientOptions);
+    const preflightAdapter = createBuiltInModelAdapter(options);
+    const hasEndpointOverride = options.provider !== undefined ||
+      options.adapter !== undefined ||
+      options.baseUrl !== undefined ||
+      options.model !== undefined ||
+      options.maxTokens !== undefined;
     const connection = AxiomaticSqliteConnection.open(path, {
       ...(options.busyTimeoutMs === undefined ? {} : { busyTimeoutMs: options.busyTimeoutMs }),
     });
     try {
       const engine = AxiomaticDurableEngine.open(connection, root);
-      return new SqliteAgentRuntime(connection, engine, client);
+      const persisted = engine.modelEndpoint();
+      const adapter = hasEndpointOverride || persisted === undefined
+        ? preflightAdapter
+        : createBuiltInModelAdapter(adapterOptionsFromEndpoint(persisted, options));
+      return new SqliteAgentRuntime(connection, engine, adapter);
     } catch (error) {
       connection.close();
       throw error;
@@ -155,16 +185,17 @@ export class SqliteAgentRuntime {
   async run(input: SqliteAgentRunInput): Promise<SqliteAgentRunResult> {
     this.#assertOpen();
     if (this.#running) fail("AXIOMATIC_RUNTIME_BUSY", "one runtime instance accepts one run at a time");
-    if (input.signal?.aborted) fail("OPENCODE_GO_ABORTED", "run was aborted before preparation");
-    this.#client.assertReady();
+    if (input.signal?.aborted) fail("MODEL_ABORTED", "run was aborted before preparation");
+    this.#adapter.assertReady();
     this.#running = true;
     const controller = new AbortController();
     const onAbort = (): void => controller.abort("caller-aborted");
     input.signal?.addEventListener("abort", onAbort, { once: true });
+    if (input.signal?.aborted) onAbort();
     this.#activeController = controller;
-    let prepared: ReturnType<AxiomaticDurableEngine["prepareOpenCodeEvaluation"]> | undefined;
+    let prepared: PreparedDurableEvaluation | undefined;
     try {
-      prepared = this.#engine.prepareOpenCodeEvaluation({
+      prepared = this.#engine.prepareEvaluation({
         parent: input.parent,
         source: input.source,
         position: input.position,
@@ -173,48 +204,42 @@ export class SqliteAgentRuntime {
           version: "environment-snapshot/v1",
           values: null,
         },
-        endpoint: {
-          version: ENDPOINT_VERSION,
-          provider: "opencode-go",
-          baseUrl: this.#client.baseUrl,
-          model: this.#client.model,
-        },
+        endpoint: this.#adapter.endpoint as unknown as CanonicalObject,
         ...(input.evaluationOccurrence === undefined
           ? {}
           : { evaluationOccurrence: input.evaluationOccurrence }),
       });
       if (controller.signal.aborted) {
-        fail("OPENCODE_GO_ABORTED", "run was aborted before dispatch");
+        fail("MODEL_ABORTED", "run was aborted before dispatch");
       }
-      if (
-        prepared.request.provider !== "opencode-go" ||
-        prepared.request.baseUrl !== this.#client.baseUrl ||
-        prepared.request.model !== this.#client.model
-      ) {
-        fail("AXIOMATIC_ENDPOINT_MISMATCH", "durable request does not match the configured transport");
+      if (!isAxiomaticModelRequestV2(prepared.request)) {
+        fail("AXIOMATIC_ENDPOINT_MISMATCH", "new durable execution produced a legacy provider request");
       }
-      this.#client.prepare(providerRequest(prepared.request));
+      if (!modelRequestMatchesEndpoint(prepared.request, this.#adapter.endpoint)) {
+        fail("AXIOMATIC_ENDPOINT_MISMATCH", "durable request does not match the selected model endpoint");
+      }
+      const preparedCall = this.#adapter.prepare(modelInput(prepared.request));
       this.#engine.claimAttempt(prepared.evaluation);
-      let completion: OpenCodeGoCompletionV1;
+      let completion;
       try {
-        completion = await this.#client.complete(providerRequest(prepared.request), controller.signal);
+        completion = await this.#adapter.complete(preparedCall, controller.signal);
       } catch (error) {
         if (!(error instanceof SemanticError)) {
           this.#engine.markUnknown(prepared.evaluation, {
-            version: "axiomatic-provider-unknown/v1",
-            code: "OPENCODE_GO_NETWORK",
+            version: "axiomatic-model-unknown/v2",
+            code: "MODEL_NETWORK",
           });
-          return this.#unknownResult(prepared, "OPENCODE_GO_NETWORK");
+          return this.#unknownResult(prepared, "MODEL_NETWORK");
         }
-        if (!isDefinitiveProviderFailure(error)) {
+        if (!isDefinitiveModelFailure(error)) {
           this.#engine.markUnknown(prepared.evaluation, {
-            version: "axiomatic-provider-unknown/v1",
+            version: "axiomatic-model-unknown/v2",
             code: error.code,
           });
           return this.#unknownResult(prepared, error.code);
         }
         this.#engine.complete(prepared.evaluation, "failed", {
-          version: "opencode-go-outcome/v1",
+          version: "axiomatic-model-outcome/v2",
           code: error.code,
         });
         const adoption = this.#engine.reject(prepared.evaluation, { code: error.code });
@@ -232,12 +257,13 @@ export class SqliteAgentRuntime {
       this.#engine.recordEmission({
         evaluation: prepared.evaluation,
         ordinal: 0,
-        producer: `opencode-go/${this.#client.model}`,
-        protocol: PROTOCOL,
+        producer: `${prepared.request.provider}/${prepared.request.model}`,
+        protocol: prepared.request.adapter,
         payload: completion.output,
       });
       this.#engine.complete(prepared.evaluation, "completed", {
-        version: "opencode-go-outcome/v1",
+        version: "axiomatic-model-outcome/v2",
+        adapter: prepared.request.adapter,
         finishReason: completion.finishReason,
         ...(completion.usage === undefined ? {} : { usage: completion.usage }),
       });
@@ -256,18 +282,23 @@ export class SqliteAgentRuntime {
         adoption,
       };
     } catch (error) {
-      if (
-        prepared !== undefined &&
-        !this.#connection.closed &&
-        this.#safeStatus(prepared.evaluation) === "attempted"
-      ) {
+      if (prepared !== undefined && !this.#connection.closed) {
+        const status = this.#safeStatus(prepared.evaluation);
         try {
-          this.#engine.markUnknown(prepared.evaluation, {
-            version: "axiomatic-provider-unknown/v1",
-            code: error instanceof SemanticError ? error.code : "AXIOMATIC_RUNTIME_FAILURE",
-          });
+          if (status === "prepared") {
+            this.#engine.failLocal(
+              prepared.evaluation,
+              "before-attempt",
+              { code: error instanceof SemanticError ? error.code : "AXIOMATIC_RUNTIME_FAILURE" },
+            );
+          } else if (status === "attempted") {
+            this.#engine.markUnknown(prepared.evaluation, {
+              version: "axiomatic-model-unknown/v2",
+              code: error instanceof SemanticError ? error.code : "AXIOMATIC_RUNTIME_FAILURE",
+            });
+          }
         } catch {
-          // Restart recovery will convert the durable attempt to unknown.
+          // Restart recovery will convert an uncertain attempted state to unknown.
         }
       }
       throw error;
@@ -280,7 +311,7 @@ export class SqliteAgentRuntime {
 
   close(): void {
     if (this.#closed) return;
-    if (this.#running) fail("AXIOMATIC_RUNTIME_BUSY", "cannot close while a provider run is active");
+    if (this.#running) fail("AXIOMATIC_RUNTIME_BUSY", "cannot close while a model run is active");
     this.#closed = true;
     this.#engine.close();
   }
@@ -294,7 +325,7 @@ export class SqliteAgentRuntime {
   }
 
   #unknownResult(
-    prepared: ReturnType<AxiomaticDurableEngine["prepareOpenCodeEvaluation"]>,
+    prepared: PreparedDurableEvaluation,
     code: string,
   ): SqliteAgentRunResult {
     return {

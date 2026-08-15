@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -67,7 +68,7 @@ try {
     readonly exports?: unknown;
   };
   assert.equal(manifest.name, "inductio");
-  assert.equal(manifest.version, "0.3.0");
+  assert.equal(manifest.version, "0.4.0");
   assert.equal(manifest.private, false);
   assert.equal(manifest.license, "MIT");
   assert.equal(manifest.packageManager, "npm@10.9.8");
@@ -93,7 +94,7 @@ try {
     readonly files: readonly { readonly path: string }[];
   }[];
   assert.ok(packed, "npm pack did not report an artifact");
-  assert.equal(packed.filename, "inductio-0.3.0.tgz");
+  assert.equal(packed.filename, "inductio-0.4.0.tgz");
   assert.deepEqual(
     packed.files.map((file) => file.path).toSorted(),
     ["LICENSE", "README.md", "RELEASE-SCOPE.md", "dist/index.d.ts", "dist/index.js", "package.json", "schema/003-axiomatic-v2.sql"],
@@ -158,8 +159,8 @@ try {
       `declarations expose lower-level core: ${hidden}`,
     );
   }
-  assert.match(declarations, /apiKeyEnv: "OPENCODE_GO"/);
-  assert.equal(declarations.includes("apiKeyEnv?:"), false, "declarations expose configurable apiKeyEnv");
+  assert.match(declarations, /ModelProviderId/);
+  assert.equal(declarations.includes("apiKeyEnv"), false, "declarations expose credential environment details");
   assert.equal(declarations.includes("fetch?: typeof globalThis.fetch"), false, "declarations expose fetch injection");
 
   mkdirSync(consumer);
@@ -181,11 +182,9 @@ import * as runtimePackage from "inductio";
 
 assert.deepEqual(Object.keys(runtimePackage).sort(), [
   "InMemoryAgentRuntime",
-  "OPENCODE_GO_DEFAULTS",
-  "OpenCodeGoClient",
+  "MODEL_DEFAULTS",
   "SemanticError",
   "SqliteAgentRuntime",
-  "compileOpenCodeGoChatRequest",
   "createInMemoryAgentRuntime",
   "effectivePolicyIdentity",
   "executePolicyPlugin",
@@ -342,13 +341,39 @@ durable.close();
   );
 
   const releaseDirectory = join(root, "release");
-  rmSync(releaseDirectory, { recursive: true, force: true });
-  mkdirSync(releaseDirectory);
+  mkdirSync(releaseDirectory, { recursive: true });
+  const siblingTarballs = new Map(
+    readdirSync(releaseDirectory)
+      .filter((name) => name.endsWith(".tgz") && name !== packed.filename)
+      .map((name) => [name, readFileSync(join(releaseDirectory, name))] as const),
+  );
+  const preservationProbe = join(
+    releaseDirectory,
+    `.package-check-preservation-${process.pid}`,
+  );
+  writeFileSync(preservationProbe, "preserve sibling release artifacts\n", "utf8");
   const releaseTarball = join(releaseDirectory, packed.filename);
-  copyFileSync(tarball, releaseTarball);
+  try {
+    copyFileSync(tarball, releaseTarball);
+    assert.equal(
+      readFileSync(preservationProbe, "utf8"),
+      "preserve sibling release artifacts\n",
+      "package check replaced the release directory",
+    );
+    for (const [name, bytes] of siblingTarballs) {
+      assert.deepEqual(
+        readFileSync(join(releaseDirectory, name)),
+        bytes,
+        `package check changed sibling release artifact ${name}`,
+      );
+    }
+  } finally {
+    rmSync(preservationProbe, { force: true });
+  }
   const sha256 = createHash("sha256").update(readFileSync(releaseTarball)).digest("hex");
   console.log("PACKAGE_CONTENTS_CHECK=PASS");
   console.log("SAME_HOST_TARBALL_BYTE_IDENTITY=PASS");
+  console.log("HISTORICAL_ARTIFACT_PRESERVATION=PASS");
   console.log("INSTALLED_PACKAGE_SMOKE=PASS");
   console.log("INSTALLED_TYPES_SMOKE=PASS");
   console.log(`PACKAGE_TARBALL=${releaseTarball}`);

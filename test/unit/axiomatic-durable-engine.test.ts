@@ -10,8 +10,9 @@ import { SemanticError } from "../../src/errors.ts";
 
 const ROOT = { rootPrompt: "durable commands", toolDefinitions: [] } as const;
 const ENDPOINT = {
-  version: "opencode-go-endpoint/v1",
+  version: "model-endpoint/v2",
   provider: "opencode-go",
+  adapter: "openai-chat-completions/v1",
   baseUrl: "https://opencode.ai/zen/go/v1/",
   model: "deepseek-v4-flash",
 } as const;
@@ -26,7 +27,7 @@ async function withPath<T>(fn: (path: string) => Promise<T> | T): Promise<T> {
 }
 
 function prepare(engine: AxiomaticDurableEngine, position: number) {
-  return engine.prepareOpenCodeEvaluation({
+  return engine.prepareEvaluation({
     parent: engine.root().root,
     source: "durable-engine-test",
     position,

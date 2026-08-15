@@ -12,21 +12,21 @@ export {
   normalizePolicyPluginPair,
 } from "./policy-sandbox.ts";
 export { SemanticError } from "./errors.ts";
-export {
-  OpenCodeGoClient,
-  OPENCODE_GO_DEFAULTS,
-  compileOpenCodeGoChatRequest,
-} from "./opencode-go-client.ts";
+export { MODEL_DEFAULTS } from "./model-adapters.ts";
 
 export type {
   SqliteAgentRunInput,
   SqliteAgentRunResult,
   SqliteAgentRuntimeOptions,
 } from "./sqlite-agent-runtime.ts";
+export type { DurableStateView } from "./axiomatic-durable-engine.ts";
 export type {
-  AxiomaticProviderRequestV1,
-  DurableStateView,
-} from "./axiomatic-durable-engine.ts";
+  AxiomaticModelRequestV2,
+  DurableProviderRequest,
+  ModelAdapterId,
+  ModelEndpointV2,
+  ModelProviderId,
+} from "./model-contract.ts";
 export type {
   EnvironmentSnapshotV1,
   EvaluationOccurrenceInput,
@@ -42,13 +42,8 @@ export type {
   RunWithPolicyPluginsInput,
 } from "./in-memory-agent-runtime.ts";
 export type {
-  OpenCodeGoChatRequestV1,
-  OpenCodeGoClientOptions,
-  OpenCodeGoCompletionV1,
-  OpenCodeGoMessageV1,
-  OpenCodeGoModelRequestV1,
-  OpenCodeGoToolV1,
-} from "./opencode-go-client.ts";
+  BuiltInAdapterOptions,
+} from "./model-adapters.ts";
 export type {
   NormalizedPolicyPluginPairV1,
   NormalizedPolicyPluginV1,

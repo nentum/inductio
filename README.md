@@ -6,70 +6,83 @@ Inductio 是 agent 语义的公理化核心：**agent 不是一个人，没有�
 
 ## 核心理念
 
-- **agent = 根 + 树**：根是引用为 null 的节点；agent 是根相同的所有节点的并集。树的生长 = 不断 append 求值结果，不是设计预演。
-- **单次求值 = 一次完整的求值调用**：求值单位不是 token，是调用。模型是无状态函数，agent 的连续性来自外部化的求值历史，不来自内部记忆。
-- **政策决定成长**：`ProjectionPolicy` 决定单次求值把哪些历史引入上下文；`AdoptionPolicy` 决定求值结果是否、如何被采纳为树的节点。不可公理化的东西被政策挡在系统外部。
-- **内容寻址**：节点身份 = 内容哈希。相同内容收敛为相同节点；引用即快照；结构共享。
-- **执行与语义分离**：Emission/Outcome（发生了什么）先落账本，Node（是什么语义）只保存政策认定的语义块——来源与语义不互相污染。
-- **命令账本**：SQLite 只存"发生了什么"（append-only 命令序列）；树的当前状态是账本重放的产物。账本线性、树分叉、CAS 裁判、崩溃后幂等重放。
+- **agent = 根 + 树**：agent 是根相同的所有节点的并集。树的生长 = 不断 append 求值结果，不是设计预演。
+- **单次求值 = 一次完整的求值调用**：模型是无状态函数，agent 的连续性来自外部化的求值历史，不来自内部记忆。
+- **内容寻址**：`node := hash(parent, block)`——相同内容收敛为相同节点；引用即快照；结构共享。
+- **执行与语义分离**：Emission/Outcome（发生了什么）先落账本，Node（是什么语义）只保存政策认定的语义块。
+- **命令账本**：SQLite 只存"发生了什么"（append-only 命令，event sourcing）；状态 = 重放。账本线性、树分叉、CAS 裁判、崩溃后幂等重放。
 
-## 当前状态（0.3.0）
+## 当前状态（0.4.0）
 
-- ✅ 公理语义核心（`src/axiomatic-v2.ts`）：Root / Node / 树 / Projection / Emission / Adoption / Evaluation
-- ✅ 确定性离线内存运行时（`src/in-memory-agent-runtime.ts`）
-- ✅ **任意政策插件 + 沙箱**（`src/policy-sandbox.ts`）：ESM-only、哈希钉扎、子进程隔离、无网络/无文件、超时可终止
-- ✅ **SQLite 命令账本**（`src/axiomatic-durable-engine.ts` + `schema/003-axiomatic-v2.sql`）：append-only 命令、事务原子性、投影表、重放校验、崩溃恢复
-- ✅ **真实模型 transport**（`src/opencode-go-client.ts`）：OpenAI-compatible、`OPENCODE_GO` 密钥、live E2E 已通过
-- ✅ 生产运行时（`src/sqlite-agent-runtime.ts`）：`SqliteAgentRuntime` 组合根，evaluate/status/close/crashClose
-- ✅ 崩溃恢复证明：attempt / Emission / Outcome 三切点 OS-kill 测试 + 多进程 CAS 竞争测试
-- ✅ 跨 OS 字节一致 CI（Windows x64 + Linux amd64）
+- ✅ 公理语义核心：Root / Node / 树 / Projection / Emission / Adoption / Evaluation
+- ✅ 离线内存运行时 + 政策插件沙箱（ESM-only、SHA-pinned、子进程隔离）
+- ✅ SQLite 命令账本：append-only、事务原子性、投影审计、崩溃恢复（OS-kill 三切点证明）
+- ✅ **多 provider transport**：统一 `ModelAdapter` 契约 + 三个内置适配器：
+  `openai-chat-completions/v1`、`openai-responses/v1`、`anthropic-messages/v1`
+- ✅ 账本版本化：`model-endpoint/v2` / `axiomatic-model-request/v2`，v1 格式保留兼容
+- ✅ 跨 OS 字节一致 CI + conformance suite（preflight/secret/错误分类/crash cut/no-retry）
 
 ## 使用
 
 ```bash
 npm install
-npm test                 # unit + multiprocess + crash
-npm run test:live:opencode-go   # 真实模型（需要 OPENCODE_GO 环境变量）
-npm run release:check    # typecheck + test + build + package check
+npm test                  # unit + multiprocess + crash
+npm run test:live:models  # 真实模型（需要对应 API 密钥环境变量）
+npm run release:check     # typecheck + test + build + package check
 ```
 
-要求 Node.js >= 22.23.0。运行时零依赖；开发依赖仅 TypeScript / esbuild / dts-bundle-generator。
+要求 Node.js >= 22.23.0。运行时零依赖。
 
-## 公开 API（0.3.0）
+## 公开 API（0.4.0）
 
 ```ts
-import { InMemoryAgentRuntime, SqliteAgentRuntime, OpenCodeGoClient } from "inductio";
+import { InMemoryAgentRuntime, SqliteAgentRuntime, executePolicyPlugin } from "inductio";
 
-// 纯内存（离线、确定性）
+// 离线（确定性）
 const memory = createInMemoryAgentRuntime({ rootPrompt: "...", evaluator: { version: "offline-evaluator/v1", kind: "echo" } });
 
-// 持久化 + 真实模型（命令账本）
-const durable = SqliteAgentRuntime.open({ databasePath: "./agent.db", root: { ... }, model: "deepseek-v4-flash" });
+// 生产（命令账本 + 真实模型，多 provider）
+const durable = SqliteAgentRuntime.open("./agent.db", { rootPrompt: "...", toolDefinitions: [] }, {
+  provider: "anthropic",            // 或 "openai" / "opencode-go"
+  adapter: "anthropic-messages/v1", // 或 openai-chat-completions/v1 / openai-responses/v1
+  model: "claude-...",
+  apiKeyEnv: "ANTHROPIC_API_KEY",   // 密钥只在 dispatch 时读取，不进账本
+});
 const result = await durable.run({ input: [...], signal });
-const stateRef = durable.stateRef();   // 状态指纹（内容寻址）
 durable.close();
 ```
 
-发布范围细节见 `RELEASE-SCOPE.md`。
-
-## 结构
+## 分层
 
 ```
 src/axiomatic-v2.ts                   公理语义核心（纯内存，重放执行）
 src/in-memory-agent-runtime.ts        确定性离线运行时
-src/policy-sandbox.ts                 政策插件沙箱（隔离执行）
-src/axiomatic-durable-engine.ts       SQLite 命令账本引擎（append/replay/audit）
+src/policy-sandbox.ts                 政策插件沙箱
+src/axiomatic-durable-engine.ts       SQLite 命令账本引擎（append/replay/audit/CAS）
 src/axiomatic-sqlite-connection.ts    SQLite 连接与 schema 安装
+src/model-adapter.ts                  统一 ModelAdapter 契约（preflight/dispatch/classify）
+src/model-adapters.ts                 三个内置适配器（chat-completions/responses/messages）
+src/model-contract.ts                 endpoint/request v2 契约（账本版本化）
 src/sqlite-agent-runtime.ts           生产运行时组合根
-src/opencode-go-client.ts             OpenAI-compatible 真实 transport
 src/index.ts                          生产入口（仅导出公开面）
-src/canonical-v1.ts                   内容寻址 / 规范化 / 哈希（基础）
 schema/003-axiomatic-v2.sql           命令账本 schema
-test/unit/                            语义 + 运行时 + 沙箱 + 持久化 + transport 测试
-test/multiprocess/                    多进程 CAS 竞争证据
-test/crash/                           OS-kill 崩溃恢复证据
-test/fixtures/policy-plugins/         沙箱插件样例（ESM）
+test/unit|multiprocess|crash|live     语义/并发/崩溃恢复/真实模型验证
 ```
+
+## 扩展点（想象力所在）
+
+- **投影政策**（沙箱）：`{root,parent,path,candidateInput,env,endpoint} → {selectedNodes, appendContent}`
+- **采纳政策**（沙箱）：`{evaluation,emissions,outcome,projection} → adopt{block} | reject{reason}`
+- **适配器**（内部注册）：`preflight → PreparedCall; dispatch(signal) → Completion; classify(err)`
+- **世界入口**：`run({input, environment})`——模型输出只经采纳政策进树
+
+## 硬边界
+
+- 政策无权力：DTO-only、沙箱（无 import/fs/net/clock、同步、超时、内存限额）
+- 账本只追加：无 update/delete；重放结果必须与记录结果一致（防篡改）
+- tool_calls 是语义文本，从不执行；无能力/副作用
+- 一个 SQLite 文件 = 一个 agent；N 个 agent = N 个文件（产品面 Map + 懒加载）
+- 密钥只在 dispatch 读取（环境变量），永不进账本/快照/错误
 
 ## 许可证
 

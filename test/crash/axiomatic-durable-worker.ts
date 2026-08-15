@@ -31,15 +31,16 @@ if (cut === "partial-projection") {
   });
   throw new Error("unreachable");
 }
-const prepared = engine.prepareOpenCodeEvaluation({
+const prepared = engine.prepareEvaluation({
   parent: engine.root().root,
   source: `axiomatic-crash-${cut}`,
   position: 1,
   input: [{ kind: "message", role: "user", content: "crash-cut" }],
   environment: { version: "environment-snapshot/v1", values: null },
   endpoint: {
-    version: "opencode-go-endpoint/v1",
+    version: "model-endpoint/v2",
     provider: "opencode-go",
+    adapter: "openai-chat-completions/v1",
     baseUrl: "https://opencode.ai/zen/go/v1/",
     model: "deepseek-v4-flash",
   },
@@ -58,7 +59,7 @@ engine.recordEmission({
 if (cut === "emission") await stop(prepared.evaluation);
 
 engine.complete(prepared.evaluation, "completed", {
-  version: "opencode-go-outcome/v1",
+  version: "axiomatic-model-outcome/v2",
   finishReason: "stop",
 });
 await stop(prepared.evaluation);

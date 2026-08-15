@@ -14,15 +14,16 @@ process.stdout.write("ready\n");
 
 process.stdin.once("data", () => {
   try {
-    engine.prepareOpenCodeEvaluation({
+    engine.prepareEvaluation({
       parent: root,
       source: "axiomatic-durable-race",
       position: 1,
       input: [{ kind: "message", role: "user", content: "same" }],
       environment: { version: "environment-snapshot/v1", values: null },
       endpoint: {
-        version: "opencode-go-endpoint/v1",
+        version: "model-endpoint/v2",
         provider: "opencode-go",
+        adapter: "openai-chat-completions/v1",
         baseUrl: "https://opencode.ai/zen/go/v1/",
         model: "deepseek-v4-flash",
       },

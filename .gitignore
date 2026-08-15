@@ -43,3 +43,9 @@ id_rsa.pub
 *.db
 *.db-wal
 *.db-shm
+
+# Local data / logs produced by examples and local runs
+data/
+*.log
+logs/
+*.tgz

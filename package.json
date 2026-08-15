@@ -1,7 +1,7 @@
 {
   "name": "inductio",
-  "version": "0.3.0",
-  "description": "Content-addressed, policy-bounded Agent semantics: axiomatic core, isolated policy sandbox, durable SQLite command ledger, and an OpenAI-compatible provider transport.",
+  "version": "0.4.0",
+  "description": "Content-addressed Agent semantics with durable SQLite execution and three native model adapters.",
   "private": false,
   "type": "module",
   "license": "MIT",
@@ -41,7 +41,6 @@
     "content-addressed",
     "deterministic",
     "runtime",
-    "sqlite",
     "semantics"
   ],
   "scripts": {
@@ -52,7 +51,7 @@
     "test:unit": "node --test --test-reporter=spec test/unit/*.test.ts",
     "test:multiprocess": "node --test --test-reporter=spec test/multiprocess/*.test.ts",
     "test:crash": "node --test --test-reporter=spec test/crash/*.test.ts",
-    "test:live:opencode-go": "node --test --test-reporter=spec test/live-opencode-go.test.ts",
+    "test:live:models": "node --test --test-reporter=spec test/live-model-adapters.test.ts",
     "test": "npm run test:unit && npm run test:multiprocess && npm run test:crash",
     "package:check": "node scripts/package-check.ts",
     "release:check": "npm run typecheck && npm run test && npm run build && npm run package:check",
