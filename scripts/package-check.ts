@@ -59,6 +59,10 @@ try {
     readonly version?: unknown;
     readonly private?: unknown;
     readonly license?: unknown;
+    readonly author?: unknown;
+    readonly repository?: unknown;
+    readonly homepage?: unknown;
+    readonly bugs?: unknown;
     readonly packageManager?: unknown;
     readonly os?: unknown;
     readonly cpu?: unknown;
@@ -71,6 +75,13 @@ try {
   assert.equal(manifest.version, "0.4.0");
   assert.equal(manifest.private, false);
   assert.equal(manifest.license, "MIT");
+  assert.equal(manifest.author, "nentum");
+  assert.deepEqual(manifest.repository, {
+    type: "git",
+    url: "git+https://github.com/nentum/inductio.git",
+  });
+  assert.equal(manifest.homepage, "https://github.com/nentum/inductio#readme");
+  assert.deepEqual(manifest.bugs, { url: "https://github.com/nentum/inductio/issues" });
   assert.equal(manifest.packageManager, "npm@10.9.8");
   assert.deepEqual(manifest.os, ["win32", "linux"]);
   assert.deepEqual(manifest.cpu, ["x64"]);
@@ -137,6 +148,8 @@ try {
     "TransportSecrets",
     "createProductRuntime",
     "CapabilityGateway",
+    "axiomatic-agent-runtime",
+    "agent-runtime-policy-sandbox",
   ]) {
     assert.equal(bundle.includes(forbidden), false, `bundle contains forbidden surface: ${forbidden}`);
     assert.equal(

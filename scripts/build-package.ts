@@ -42,6 +42,7 @@ writeFileSync(join(dist, "index.d.ts"), declarations, "utf8");
 
 for (const path of [
   join(root, "package.json"),
+  join(root, "LICENSE"),
   join(root, "README.md"),
   join(root, "RELEASE-SCOPE.md"),
   join(root, "schema/003-axiomatic-v2.sql"),

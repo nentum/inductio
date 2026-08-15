@@ -15,17 +15,8 @@ import {
   type AdapterConstructorOptions,
   type ModelInputV1,
 } from "./model-adapter.ts";
-import type { ModelAdapterId, ModelEndpointV2, ModelProviderId } from "./model-contract.ts";
+import type { ModelAdapterId, ModelProviderId } from "./model-contract.ts";
 import type { CanonicalValue } from "./types.ts";
-
-interface InternalModelDefaults {
-  readonly provider: ModelProviderId;
-  readonly adapter: ModelAdapterId;
-  readonly baseUrl: string;
-  readonly model: string;
-  readonly maxTokens?: number;
-  readonly apiKeyEnv: string;
-}
 
 const INTERNAL_DEFAULTS = Object.freeze({
   opencodeGo: Object.freeze({

@@ -112,7 +112,9 @@ const ADAPTER_CASES: readonly {
 test("OpenAI Chat Completions adapter compiles and normalizes its native wire shape", async () => {
   await withEnvironment({ OPENAI_API_KEY: "openai-test-key" }, async (input, init) => {
     assert.equal(input, "https://api.openai.test/v1/chat/completions");
-    assert.equal(new Headers(init?.headers).get("authorization"), "Bearer openai-test-key");
+    const headers = new Headers(init?.headers);
+    assert.equal(headers.get("authorization"), "Bearer openai-test-key");
+    assert.equal(headers.get("user-agent"), "inductio/openai-chat-completions/v1");
     const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
     assert.equal(body.model, "chat-model");
     assert.equal(body.stream, false);
@@ -169,7 +171,9 @@ test("durable request binding matches every selected endpoint identity field", (
 test("OpenAI Responses adapter uses /responses and parses message/reasoning output", async () => {
   await withEnvironment({ OPENAI_API_KEY: "responses-test-key" }, async (input, init) => {
     assert.equal(input, "https://api.openai.test/v1/responses");
-    assert.equal(new Headers(init?.headers).get("authorization"), "Bearer responses-test-key");
+    const headers = new Headers(init?.headers);
+    assert.equal(headers.get("authorization"), "Bearer responses-test-key");
+    assert.equal(headers.get("user-agent"), "inductio/openai-responses/v1");
     const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
     assert.equal(body.model, "responses-model");
     assert.equal(body.instructions, "system prompt");
@@ -228,6 +232,7 @@ test("Anthropic Messages adapter uses native headers and content blocks", async 
     const headers = new Headers(init?.headers);
     assert.equal(headers.get("x-api-key"), "anthropic-test-key");
     assert.equal(headers.get("anthropic-version"), "2023-06-01");
+    assert.equal(headers.get("user-agent"), "inductio/anthropic-messages/v1");
     const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
     assert.equal(body.model, "claude-test");
     assert.equal(body.system, "system prompt");

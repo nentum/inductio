@@ -1,133 +1,130 @@
 # Release Scope: inductio 0.4.0
 
-## Supported Profile
+## Included profiles
 
-The 0.4.0 artifact contains three bounded profiles:
+The `inductio@0.4.0` package contains three bounded profiles:
 
-1. The deterministic offline in-memory runtime preserved from 0.1.0.
-2. The SHA-pinned child-process policy plugin runner preserved from 0.4.0, with a
-   best-effort process/permission security boundary.
-3. A durable SQLite runtime exposed only through `SqliteAgentRuntime`.
+1. a deterministic offline in-memory runtime;
+2. a SHA-pinned, best-effort child-process policy-plugin path;
+3. a durable SQLite runtime exposed only through `SqliteAgentRuntime`.
 
 Common support metadata:
 
 - Node.js `>=22.23.0`;
 - npm `10.9.8` for release reproduction;
-- Windows and Linux x64 only;
-- zero npm runtime dependencies;
-- browser, macOS, ARM, and other architectures unsupported.
+- Windows and Linux x64;
+- MIT License;
+- zero npm runtime dependencies.
 
-The durable profile provides:
+Browser, macOS, ARM, and other architectures are not supported by this release.
 
-- a local absolute-path SQLite file using packaged `schema/003-axiomatic-v2.sql`;
-- WAL, `synchronous=FULL`, foreign keys, `trusted_schema=OFF`, finite busy timeout,
-  schema-manifest verification, integrity checks, and fail-closed corruption mapping;
-- an append-only canonical command journal and mutable singleton command head;
-- replay from zero with command/result hash checks and `stateRef` verification;
-- content-addressed Root/Node semantic projections and separate execution/request/
-  adoption projections;
-- complete command-head `(sequence, commandRef, stateRef)` CAS for concurrent writers;
-- request-before-attempt and Emission-before-Outcome ordering;
-- restart conversion of attempted-without-outcome work to `unknown`, with no automatic
-  retry and no second attempt;
-- deterministic built-in complete-output Adoption recovery when a terminal Outcome was
-  committed before process termination;
-- three native, closed protocol adapters:
-  `openai-chat-completions/v1`, `openai-responses/v1`, and `anthropic-messages/v1`;
-- OpenCode Go represented as an OpenAI Chat Completions endpoint profile, with default
-  endpoint `https://opencode.ai/zen/go/v1/` and model `deepseek-v4-flash`;
-- provider-specific OpenAI and Anthropic endpoint defaults, bounded request/response bodies,
-  finite timeout, AbortSignal cancellation, credential sanitization, and explicit
-  definitive-failure versus unknown classification;
-- adapter/provider/model/base URL/max-token identity persisted in the v2 model request.
+## Semantic and durable guarantees
 
-Provider request construction derives only from the adopted ProjectionPlan, Root,
-selected semantic history, candidate input, environment, and endpoint. Caller-provided
-raw semantic bodies, arbitrary client callbacks, raw transport handles, credential
-resolvers, and provider failover policies are not accepted by `SqliteAgentRuntime`.
+The supported runtime maintains these boundaries:
 
-## Public Authority Boundary
+- Root and Node values are canonical, content-addressed, and append-only;
+- every Node has exactly one existing parent;
+- a Session is represented by a head and its unique Root-to-head path;
+- Projection derives model-visible input but does not write semantic Nodes;
+- a durable model request is committed before its Attempt;
+- Emission is committed before Outcome or Adoption;
+- only an explicit Adoption decision may append a semantic Node;
+- the execution ledger is separate from the semantic Session path;
+- a committed Attempt without a terminal Outcome recovers as `unknown`;
+- `unknown` never grants an automatic second Attempt;
+- a terminal Outcome interrupted before Adoption is recovered deterministically.
 
-The package exports restricted runtime facades and inert DTO types. It does not export:
+The SQLite profile uses a local absolute file path and the packaged
+`schema/003-axiomatic-v2.sql`. It enables WAL, `synchronous=FULL`, foreign keys,
+`trusted_schema=OFF`, finite busy timeout, schema-manifest verification, integrity checks,
+append-only command records, replay-from-zero validation, and command-head CAS.
 
-- `AxiomaticRuntimeV2`, `AxiomaticDurableEngine`, or `AxiomaticSqliteConnection`;
-- raw SQLite connections or SQL execution;
-- `InternalHost`, owner tokens, permits, core commit ports, or Artifact queries;
-- model client/fetch callbacks through the durable facade;
-- secrets or mutable credential-provider hooks;
-- arbitrary in-process ProjectionPolicy/AdoptionPolicy callbacks;
-- capability implementations or irreversible effect handles.
+These checks do not protect against complete database rollback, host compromise, a lying
+storage controller, or an attacker able to replace all database media consistently.
 
-Provider tool calls are rejected with `MODEL_UNSUPPORTED_TOOL_CALL`; this profile does not
-execute tools or capabilities.
+## Model adapters
 
-## Credential Boundary
-
-Credential environment variables are fixed by the selected built-in provider and are read
-only at preflight/dispatch:
+The built-in adapter set is closed:
 
 ```text
-opencode-go + openai-chat-completions/v1  OPENCODE_GO
-openai + either OpenAI adapter            OPENAI_API_KEY
-anthropic + anthropic-messages/v1         ANTHROPIC_API_KEY
+opencode-go -> openai-chat-completions/v1 -> POST /chat/completions
+openai      -> openai-chat-completions/v1 -> POST /chat/completions
+openai      -> openai-responses/v1        -> POST /responses
+anthropic   -> anthropic-messages/v1      -> POST /messages
 ```
 
-The variables are not public options and their values never enter model requests, command
-bodies, state references, snapshots, SQLite media, or errors.
+OpenCode Go is an endpoint profile of the Chat Completions adapter, not a separate durable
+architecture. New durable evaluations use `model-endpoint/v2` and
+`axiomatic-model-request/v2`. Historical `axiomatic-provider-request/v1` records remain
+replay-compatible but are not generated by the new path.
 
-## Failure And Recovery Boundary
+Persistent request identity includes provider, adapter, canonical base URL, model, and the
+optional maximum-token setting. The facade performs a defense-in-depth equality check between
+that durable identity and the selected wire adapter before Attempt.
 
-The runtime does not claim local/external exactly-once atomicity. Instead:
+## Credentials and public authority
 
-- local configuration, credential, and request-bound failures occur before Attempt;
-- HTTP/protocol/tool-call/response-limit failures produce a durable failed Outcome and Reject;
-- network, timeout, caller abort, and uncertain transport failures become `unknown`;
-- crash after request/Attempt but before Outcome recovers to `unknown`;
-- crash after Emission but before Outcome retains Emission and recovers to `unknown`;
-- crash after terminal Outcome but before Adoption deterministically resumes the built-in
-  AdoptionPolicy;
-- no path automatically dispatches a second provider request or performs provider failover.
+Credential variables are selected internally and read only during preflight/dispatch:
 
-SQLite consistency checks protect internal structure and hash bindings. They do not protect
-against wholesale database rollback, host compromise, disk/controller lies, or external
-tampering by an attacker with replacement access to all database media.
+```text
+opencode-go  OPENCODE_GO
+openai       OPENAI_API_KEY
+anthropic    ANTHROPIC_API_KEY
+```
 
-## Explicitly Unsupported
+Credential values and environment-variable metadata are not public options. They must not
+enter semantic input, durable requests, command records, snapshots, state references,
+SQLite/WAL/SHM, logs, or error text.
+
+The package exports restricted facades and inert DTO types. It does not export or accept:
+
+- the v2 semantic core or durable engine;
+- raw SQLite connections or SQL;
+- model client, adapter object, `fetch`, transport, or credential-resolver injection;
+- owner tokens, permits, core write ports, capability implementations, or effect handles;
+- arbitrary in-process ProjectionPolicy or AdoptionPolicy callbacks.
+
+Provider tool calls fail with `MODEL_UNSUPPORTED_TOOL_CALL`. This profile does not execute
+tools or capabilities.
+
+## Failure classification
+
+- configuration, credential, input, and request-bound errors fail before Attempt;
+- HTTP, protocol, provider tool-call, and response-bound errors produce a failed Outcome and
+  Reject;
+- network failure, timeout, caller abort, and uncertain transport become `unknown`;
+- no path automatically retries or transparently fails over to another provider.
+
+The runtime does not claim that an external request and local commit are exactly-once atomic.
+
+## Policy-plugin boundary
+
+Policy modules are source-hash pinned, loaded in a separate Node process, restricted with
+Node permissions, bounded by timeout and memory settings, and validated again by the host.
+This is a best-effort boundary, not a formal hostile-code sandbox. Untrusted tenant code
+requires an independently reviewed container or VM boundary, syscall/network policy, and
+external resource controls.
+
+## Explicitly unsupported
 
 Version 0.4.0 does not provide or claim:
 
-- capability execution, tool side effects, or irreversible external actions;
-- automatic retry, exactly-once provider execution, or transparent multi-provider failover;
-- streaming provider resume or streaming durable Emission fragments;
-- general environment CAS/version validation at dispatch;
+- capability execution or irreversible external effects;
+- automatic retry, exactly-once provider execution, or transparent failover;
+- streaming resume or durable streaming fragments;
+- distributed consensus, remote/shared-filesystem ownership, or multi-host CAS;
 - independent InterpretationPolicy or capability-proposal schemas;
-- arbitrary durable policy plugins in `SqliteAgentRuntime`;
-- formal hostile-code isolation for the 0.4.0 plugin runner;
-- distributed consensus, remote/shared filesystems, or multi-host ownership;
-- v1 semantic-store migration into the new axiomatic v2 database format;
-- browser, macOS, ARM, or architectures other than x64.
+- arbitrary durable policy callbacks in `SqliteAgentRuntime`;
+- formal hostile-code isolation;
+- browser, macOS, or ARM support.
 
-The plugin runner remains a best-effort Node process/permission boundary. Strongly
-adversarial tenant code requires an independently reviewed OS/container/VM boundary,
-syscall/network policy, and external resource controls.
-
-## Release Decision
-
-The 0.1.0 offline, 0.4.0 best-effort policy, and 0.3.0 OpenCode Go checkpoint decisions
-remain historical. The 0.4.0 Windows x64 and Linux amd64 clean-candidate source/package
-gates, native adapter conformance suites, and cross-OS artifact byte identity have passed.
-The durable/provider artifact remains `CONDITIONAL` for public distribution until:
-
-- owner-selected license, npm authentication, and explicit push/publish authorization
-  are supplied;
-- opt-in live probes, if required by the owner, are run separately from the offline gate.
-
-The final artifact identity is recorded in the repository-level 0.4.0 multi-provider
-release checkpoint; ARM remains `NOT RUN`.
+## Release status
 
 `npm run release:check` is offline and does not consume provider quota. The opt-in
-`npm run test:live:models` command is separate, sends at most one request per test, and
-must not be added to the ordinary release gate.
+`npm run test:live:models` command is separate and sends at most one non-retried request for
+each enabled case.
 
-The package is `MIT`. Build and release checks do not push, tag, publish, select a
-license, or authenticate to npm.
+The local candidate evidence and final artifact identity are recorded in
+`docs/INDUCTIO-0.4.0-RELEASE-CHECKPOINT.zh-CN.md`. The package is MIT-licensed but has not been
+published to npm by the repository checks. Build and verification commands do not push, tag,
+publish, or authenticate to npm.

@@ -1,8 +1,18 @@
 import { createHash } from "node:crypto";
 
-import { HASH_DOMAINS } from "./domains.ts";
 import { SemanticError } from "./errors.ts";
-import type { AgentRef, AgentRootRef, BuildSpec, CanonicalValue, CapabilitySpec } from "./types.ts";
+import type { CanonicalValue } from "./types.ts";
+
+interface BuildCapability {
+  readonly name: string;
+  readonly description: string;
+  readonly parameters: CanonicalValue;
+}
+
+interface BuildIdentity {
+  readonly fixedSystemPrompt: string;
+  readonly capabilities: readonly BuildCapability[];
+}
 
 const BUILD_FIELDS = ["fixedSystemPrompt", "capabilities"] as const;
 const CAPABILITY_FIELDS = ["name", "description", "parameters"] as const;
@@ -161,7 +171,10 @@ function normalizeBuildValue(value: CanonicalValue): CanonicalValue {
     for (const [key, entry] of Object.entries(value)) {
       const normalizedKey = normalizeNewlines(key);
       if (Object.hasOwn(normalized, normalizedKey)) {
-        fail("BUILD_KEY_NORMALIZATION_COLLISION", `构建字段 ${key} 在换行规范化后发生键冲突`);
+        fail(
+          "BUILD_KEY_NORMALIZATION_COLLISION",
+          `构建字段 ${key} 在换行规范化后发生键冲突`,
+        );
       }
       normalized[normalizedKey] = normalizeBuildValue(entry);
     }
@@ -172,20 +185,19 @@ function normalizeBuildValue(value: CanonicalValue): CanonicalValue {
 
 function assertExactFields(value: object, expected: readonly string[], kind: string): void {
   const actual = Object.keys(value).toSorted();
-  const wanted = expected.toSorted();
+  const wanted = [...expected].toSorted();
   if (canonicalize(actual) !== canonicalize(wanted)) {
     fail("UNKNOWN_BUILD_FIELD", `${kind} 字段必须恰为 ${wanted.join(", ")}`);
   }
 }
 
 function compareUtf8(left: string, right: string): number {
-  const leftBytes = Buffer.from(left, "utf8");
-  const rightBytes = Buffer.from(right, "utf8");
-  return leftBytes.compare(rightBytes);
+  return Buffer.from(left, "utf8").compare(Buffer.from(right, "utf8"));
 }
 
-export function normalizeBuild(spec: BuildSpec): CanonicalValue {
-  canonicalize(spec);
+/** Internal normalization used by the v2 Root identity. */
+export function normalizeBuild(spec: BuildIdentity): CanonicalValue {
+  canonicalize(spec as unknown as CanonicalValue);
   if (
     !spec ||
     typeof spec !== "object" ||
@@ -211,12 +223,11 @@ export function normalizeBuild(spec: BuildSpec): CanonicalValue {
       name: normalizeNewlines(capability.name),
       description: normalizeNewlines(capability.description),
       parameters: normalizeBuildValue(capability.parameters),
-    } satisfies CapabilitySpec;
+    } satisfies BuildCapability;
   });
   capabilities.sort((left, right) => compareUtf8(left.name, right.name));
 
-  for (let index = 0; index < capabilities.length; index += 1) {
-    const capability = capabilities[index]!;
+  for (const [index, capability] of capabilities.entries()) {
     if (capability.name === "") {
       fail("EMPTY_CAPABILITY_NAME", "能力名称不能为空");
     }
@@ -229,12 +240,4 @@ export function normalizeBuild(spec: BuildSpec): CanonicalValue {
     fixedSystemPrompt: normalizeNewlines(spec.fixedSystemPrompt),
     capabilities,
   };
-}
-
-export function agentRef(spec: BuildSpec): AgentRef {
-  return contentRef(HASH_DOMAINS.build, normalizeBuild(spec));
-}
-
-export function agentRootRef(agent: AgentRef): AgentRootRef {
-  return contentRef(HASH_DOMAINS.root, agent);
 }

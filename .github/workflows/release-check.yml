@@ -30,7 +30,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: package-${{ matrix.os }}
-          path: release/inductio-0.3.0.tgz
+          path: release/inductio-0.4.0.tgz
           if-no-files-found: error
           retention-days: 14
 
@@ -48,7 +48,7 @@ jobs:
           name: package-ubuntu-latest
           path: artifacts/linux
       - run: |
-          sha256sum artifacts/windows/inductio-0.3.0.tgz
-          sha256sum artifacts/linux/inductio-0.3.0.tgz
-          cmp artifacts/windows/inductio-0.3.0.tgz artifacts/linux/inductio-0.3.0.tgz
+          sha256sum artifacts/windows/inductio-0.4.0.tgz
+          sha256sum artifacts/linux/inductio-0.4.0.tgz
+          cmp artifacts/windows/inductio-0.4.0.tgz artifacts/linux/inductio-0.4.0.tgz
           echo "CROSS_OS_TARBALL_BYTE_IDENTITY=PASS"

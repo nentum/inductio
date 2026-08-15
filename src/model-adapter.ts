@@ -396,7 +396,7 @@ export abstract class JsonModelAdapter implements ModelAdapter {
     if (this.maxTokens !== undefined) assertFiniteInteger(this.maxTokens, "maxTokens", 1, 1_000_000);
     this.#fetch = globalThis.fetch;
     if (typeof this.#fetch !== "function") fail("MODEL_UNAVAILABLE", "global fetch is unavailable");
-    this.userAgent = options.userAgent ?? `axiomatic-agent-runtime/${options.adapter}`;
+    this.userAgent = options.userAgent ?? `inductio/${options.adapter}`;
     if (!/^[\x20-\x7e]{1,256}$/.test(this.userAgent)) {
       fail("MODEL_INVALID_INPUT", "userAgent must be 1-256 printable ASCII characters");
     }

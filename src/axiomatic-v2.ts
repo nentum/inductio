@@ -749,7 +749,7 @@ export class AxiomaticRuntimeV2 {
 
   prepareEvaluation(input: PrepareEvaluationInput): EvaluationRunRef {
     this.#assertPolicyHasNoPower();
-    const root = this.#rootForRevision(input.parent);
+    this.#rootForRevision(input.parent);
     const occurrence = this.#occurrences.get(input.occurrence);
     if (!occurrence) fail("AXIOMATIC_UNKNOWN_OCCURRENCE", `未知 InvocationOccurrence ${input.occurrence}`);
     this.#assertArtifactKind(input.environment, DOMAINS.environment, "environment");

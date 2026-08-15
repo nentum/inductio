@@ -16,7 +16,6 @@ import {
   type AxiomaticRootBody,
   type AxiomaticStateView,
   type EvaluationRunRef,
-  type EvaluationStatus,
   type EvaluationView,
   type PolicyIdentity,
   type ProjectionDraft,

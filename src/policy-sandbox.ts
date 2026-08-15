@@ -474,7 +474,7 @@ export async function executePolicyPlugin(
   return await new Promise<PolicyPluginResult>((resolveResult, rejectResult) => {
     const child = spawn(process.execPath, args, {
       env: {
-        NODE_ENV: "agent-runtime-policy-sandbox",
+        NODE_ENV: "inductio-policy-sandbox",
       },
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
