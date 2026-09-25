@@ -1,0 +1,10 @@
+[project]
+name = "deductio-experiment-v1"
+version = "0.2.0"
+description = "Append-only ledger with one-shot requests and sealed instance outputs"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

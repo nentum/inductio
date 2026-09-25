@@ -1,0 +1,24 @@
+[
+  {
+    "kind": "function",
+    "data": {
+      "name": "example.echo",
+      "runner": "python",
+      "code": "import sys,json,sqlite3\ncall=json.load(sys.stdin)\ncon=sqlite3.connect(call[\"ledger_uri\"],uri=True)\nfor ref in call[\"inputs\"]:\n    item=json.loads(con.execute(\"SELECT data FROM entries WHERE id=?\",(ref,)).fetchone()[0])\n    print(json.dumps({\"kind\":\"output\",\"data\":{\"echo\":item[\"text\"]}},ensure_ascii=False),flush=True)\ncon.close()\nprint(json.dumps({\"kind\":\"end\",\"data\":{\"reason\":\"echo_submitted\"}}),flush=True)\n"
+    }
+  },
+  {
+    "kind": "output",
+    "data": {
+      "tag": "example.input",
+      "text": "你好，deductio"
+    }
+  },
+  {
+    "kind": "request",
+    "data": {
+      "functions": "SELECT id FROM entries WHERE kind='function' AND json_extract(data,'$.name')='example.echo'",
+      "inputs": "SELECT id FROM entries WHERE json_extract(data,'$.tag')='example.input'"
+    }
+  }
+]

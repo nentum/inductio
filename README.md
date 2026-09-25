@@ -1,169 +1,62 @@
-# Inductio
+# Inductio:追加式账本解释器
 
-Inductio 是一个 TypeScript 库，服务于基于 LLM 的 agent 系统。但它并非试图提供一个更好的 agent 框架，而是尝试提供一个更好的地基，从而提升 agent 框架的上限。
+一个跑在本机的**追加式账本解释器**。所有内容——函数代码、调用请求、认领记录、输出、事件——都以追加方式写入一个 SQLite 账本;解释器持续扫描账本中的请求条目,把匹配的函数代码作为 Python 子进程执行,并把子进程 stdout 的 JSON 帧校验后追加回账本。
 
-它不关心工作流的画法，而关心一个 agent，它如何拥有稳定的身份、可追溯的历史，以及在进程崩溃后仍然说得清“发生过什么”。
+解释器自身不做任何业务;所有业务逻辑都是账本里的普通函数代码。
 
-## 核心理念
+## 核心设计
 
-- 目前来说，大模型与人类的智能形态差异较大，因此 Inductio 希望尽可能从机械的视角看待大模型。例如，Inductio 将一次完整的模型求值作为最小工作单位，而不是把一段 prompt 当作 agent 本身。
-
-- agent 个体锚定在一个不可变的 Root。所有从该 Root 沿单一 parent 链合法生长出的内容节点，共同构成一个 agent。也就是说，它原生并强烈支持 branch。
-
-- 账本系统。关键执行过程先记录，再推进状态，尽可能做到一切有据可查。
-
-- 内容寻址驱动。内容决定引用，而不是由运行时随机分配身份。
-
-- 细粒度事件追踪。进程崩溃后，可以沿账本重放并恢复已经确定的状态；无法确定的外部调用会被标记为 unknown，而不是偷偷重试。
-
-- 引用是只读的。读取内容引用、状态指纹或快照不会干扰系统继续运行。
-
-- 乐观锁（CAS）当裁判。基于过期版本的并发写入会被拒绝，而不是互相覆盖。
-
-- 模型输出不会自动成为 agent 的一部分。它必须先成为可审计的 Emission，再经过明确的采纳决定，才可能形成新的内容节点。
-
-## 目前提供什么
-
-- 确定性的离线内存运行时；
-- 可序列化、可校验的运行时快照；
-- 受限的政策插件执行路径；
-- 基于 SQLite 的 append-only 命令账本；
-- 崩溃恢复、重放校验与并发 CAS；
-- OpenAI Chat Completions、OpenAI Responses 和 Anthropic Messages 三种原生模型适配器；
-- OpenCode Go 作为 OpenAI Chat Completions 的一个 endpoint profile；
-- 零 npm 运行时依赖。
-
-当前版本只支持 Node.js `>=22.23.0`，以及 Windows/Linux x64。浏览器、macOS 和 ARM 尚未验证或支持。Inductio 仍处于 `0.x` 早期阶段，升级前请先阅读 release scope 并验证已有账本。
-
-## 安装
-
-Inductio 目前还没有执行 npm publish。可以先从源码构建：
-
-```bash
-git clone https://github.com/nentum/inductio.git
-cd inductio
-npm ci --ignore-scripts --no-audit --no-fund
-npm run build
-```
-
-也可以生成本地 tarball，再安装到另一个项目：
-
-```bash
-npm run package:check
-npm install /absolute/path/to/inductio/release/inductio-0.4.0.tgz
-```
+- **账本是唯一事实源**。函数代码不按文件加载,而是作为账本条目存储;调用什么函数、用什么输入,由请求条目中的 SQL 从账本中精确选出。
+- **只追加**。`UPDATE`/`DELETE` 被 SQLite 触发器直接拒绝,历史不可改写;封口(`end`)之后实例不再有输出。退出码、进程崩溃都只是"观察",不推断业务成败。
+- **单写者**。同一时刻只有一个解释器进程可写账本(OS 文件锁);一切写入经由单线程调度器,每条记录有确定的先后。
+- **外部内容必须经过真实入口**。外部程序只能通过入口函数进程的回环 TCP 端口提交内容,入口把它作为自己的普通 stdout 输出交给解释器入账;没有离线直写账本的退路。
+- **没有隐藏的自动化**。解释器只做"发现请求 → 调度执行";不存在默认的 agent 循环,后继调用必须来自明确的请求记录。
 
 ## 快速开始
 
-### 离线运行
-
-离线路径不访问真实模型，适合测试语义、分支和重放：
-
-```ts
-import { createInMemoryAgentRuntime } from "inductio";
-
-const runtime = createInMemoryAgentRuntime({
-  rootPrompt: "你是一个简洁的助手。",
-  toolDefinitions: [],
-});
-
-const result = runtime.run({
-  parent: runtime.root().root,
-  source: "example",
-  position: { sequence: 1 },
-  input: [{ kind: "message", role: "user", content: "你好" }],
-  evaluator: { version: "offline-evaluator/v1", kind: "echo" },
-});
-
-console.log(result.status, result.head);
-```
-
-### SQLite 与真实模型
-
-SQLite 路径必须是本机绝对路径。一次 Attempt 最多只会发送一次 provider 请求；Inductio 不会自动重试或透明切换 provider。
-
-```ts
-import { resolve } from "node:path";
-import { SqliteAgentRuntime } from "inductio";
-
-const runtime = SqliteAgentRuntime.open(
-  resolve("inductio-example.sqlite"),
-  {
-    rootPrompt: "你是一个简洁的助手。",
-    toolDefinitions: [],
-  },
-  {
-    provider: "anthropic",
-    adapter: "anthropic-messages/v1",
-    model: "claude-3-5-haiku-latest",
-  },
-);
-
-try {
-  const result = await runtime.run({
-    parent: runtime.root().root,
-    source: "example",
-    position: { sequence: 1 },
-    input: [{ kind: "message", role: "user", content: "你好" }],
-  });
-
-  console.log(result.status, result.head);
-} finally {
-  runtime.close();
-}
-```
-
-## 模型配置
-
-| Provider | Adapter | 密钥环境变量 |
-| --- | --- | --- |
-| OpenCode Go | `openai-chat-completions/v1` | `OPENCODE_GO` |
-| OpenAI | `openai-chat-completions/v1` 或 `openai-responses/v1` | `OPENAI_API_KEY` |
-| Anthropic | `anthropic-messages/v1` | `ANTHROPIC_API_KEY` |
-
-密钥变量由内置 provider 固定映射，不能通过公开 API 改写。密钥只在请求前读取，不进入语义节点、请求账本、快照、状态引用、SQLite/WAL/SHM 或错误文本。
-
-## 明确不做什么
-
-Inductio 当前不是完整的 agent 框架，也不提供：
-
-- 自动重试或透明 provider failover；
-- tool call、能力执行或不可逆外部副作用；
-- streaming resume；
-- 分布式共识或多机共享账本；
-- 面向恶意租户的正式安全沙箱。
-
-政策插件使用独立子进程和 Node 权限限制，但这只是 best-effort 边界。面对不可信代码时，仍应使用经过独立审计的容器或虚拟机隔离。
-
-## 开发
+要求 Python ≥ 3.12,无第三方依赖。
 
 ```bash
-npm ci --ignore-scripts --no-audit --no-fund
-npm run typecheck
-npm test
-npm run release:check
+python -m deductio init my.db     # 建立新账本(schema 2):创世元数据 + 入口函数 + builtin:stop
+python -m deductio run my.db      # 启动解释器:发启动根请求,拉起入口,持续调度
 ```
 
-真实模型测试是独立的 opt-in 命令，不属于普通离线 gate：
+另一个终端向运行中的系统提交内容:
 
 ```bash
-npm run test:live:models
+python -m deductio entry-status my.db   # 真实探活入口(会留一条探测输出)
+python -m deductio append my.db examples/seed.json   # 经入口 TCP 提交函数/材料/请求
+python -m deductio show my.db           # 只读查看账本
 ```
 
-更多精确的支持范围和边界见 [RELEASE-SCOPE.md](RELEASE-SCOPE.md)。
+`append` 也可用 `-` 从 stdin 读入。账本未运行、入口已关闭时,`append` 明确失败。
 
-## 贡献
+## 账本条目
 
-Issue 和 Pull Request 都欢迎。提交前请先阅读 [贡献指南](https://github.com/nentum/inductio/blob/main/CONTRIBUTING.md)，并确保 `npm run release:check` 通过。
+单一 `entries` 表,六种条目类型:`function` / `request` / `claim` / `output` / `end` / `event`。
+每行含:`id`(账本局部正整数)、`kind`、`data`(JSON 载荷)、`claim_id` + `position`(输出来源实例及序号)、`writer`(写入会话)、`created_at`。
 
-如果发现安全问题，请不要在公开 Issue 中附上利用细节，处理方式见 [安全策略](https://github.com/nentum/inductio/blob/main/SECURITY.md)。
+函数子进程协议:stdin 一次性收到 JSON 调用信封(协议 `deductio.v2`,含 `protocol`/`function`/`claim`/`inputs`/`snapshot`/`ledger_uri`),读完即 EOF;stdout 逐行输出 JSON 帧(`output` / `request` / `function` / `end`),每帧上限 1 MiB。函数对账本只有只读 SQL 权限。
 
-## 致歉
+## 命令一览
 
-由于本项目早期几乎完全由 AI 执行落地，内容和代码中可能存在难以理解的地方，例如部分标识符和历史命名。
+| 命令 | 作用 |
+|---|---|
+| `init` | 创建新账本(创世事务,不运行函数) |
+| `run` | 启动解释器(`--until-idle` 排空退出;`--max-running` 普通并发上限,默认 8) |
+| `append` | 经入口 TCP 提交条目 |
+| `show` | 只读查看账本(`--after` / `--limit`) |
+| `entry-status` | 真实探活入口(握手 + 探测输出入账确认) |
+| `close-entry` | 请求入口自行交出 end 并封口 |
+| `demo` | 在新账本上运行一次完整的父子函数演示 |
 
-敬请谅解。我会持续优化，也欢迎直接指出问题。
+## 测试
 
-## 开源协议
+```bash
+python -W error::ResourceWarning -m pytest -q -W error::pytest.PytestUnraisableExceptionWarning --tb=short
+python -m compileall -q deductio tests
+```
 
-[MIT](LICENSE)
+## 边界
+
+可信本机使用:没有恶意代码沙箱、跨用户鉴权或完整进程树隔离;身份握手防止误连旧实例,不是秘密令牌认证。账本 schema 1 与 2 不兼容,旧账本只能 `show` 只读查看,不原地迁移。
